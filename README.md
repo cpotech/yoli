@@ -2,6 +2,8 @@
 
 A small, provider-agnostic coding-agent CLI written in Go.
 
+https://github.com/user-attachments/assets/93ee9f20-f867-400a-9ccf-06af28e14edd
+
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.
 
