@@ -42,9 +42,9 @@ go install ./cmd/yoli
 
 ## Running in a container (recommended)
 
-The agent can still make mistakes — an unintended `rm`, an overbroad `git`
-command, a stray network request — so running yoli in a container confines
-those actions to a disposable environment instead of your host.
+Coding agents are not security boundaries. They can be vulnerable to prompt injection, may hallucinate or produce incorrect outputs, 
+and can occasionally perform unintended actions (such as destructive commands or unexpected network requests). Running Yoli in a container 
+is strongly recommended to isolate execution and protect your host system from both malicious inputs and accidental mistakes.
 
 ### Quick way: the wrapper script
 
