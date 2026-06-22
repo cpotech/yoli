@@ -1,0 +1,71 @@
+# Run yoli with a network firewall: all outbound internet is allowed, the
+# local/private networks are blocked, and there is no inbound access.
+#
+# A tiny sidecar (`netfw`) owns the network namespace and applies iptables
+# rules (see deploy/egress-firewall.sh); the yoli container joins that same
+# namespace with `network_mode: "service:netfw"`, so the rules cover all of
+# yoli's traffic — every protocol, not just HTTP.
+#
+# Usage:
+#   export OPENROUTER_API_KEY=...        # required
+#   export BRAVE_API_KEY=...             # optional, for web search
+#   docker compose -f docker-compose.egress.yml run --rm yoli            # tui
+#   docker compose -f docker-compose.egress.yml run --rm yoli chat "hi"  # one-shot
+#
+# By default the current directory is mounted at /work; override with
+#   YOLI_WORKDIR=/path/to/project docker compose -f docker-compose.egress.yml run --rm yoli ...
+
+services:
+  netfw:
+    image: alpine:3.20
+    cap_add:
+      - NET_ADMIN
+    # Use public resolvers: the firewall blocks the private ranges, so a DNS
+    # server on your LAN (the usual default) would be unreachable.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    environment:
+      BRIDGE_SUBNET: 172.31.255.0/24
+    volumes:
+      - ./deploy/egress-firewall.sh:/firewall.sh:ro
+    # iptables isn't in base alpine; install it (the default policy is still
+    # open at this point) and then apply the rules.
+    command: sh -c "apk add --no-cache iptables >/dev/null && exec /firewall.sh"
+    networks:
+      egress:
+        ipv4_address: 172.31.255.2
+    restart: unless-stopped
+    healthcheck:
+      # yoli only starts once the blocking rules are actually in place.
+      test: ["CMD", "iptables", "-C", "OUTPUT", "-d", "192.168.0.0/16", "-j", "REJECT"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  yoli:
+    build: .
+    depends_on:
+      netfw:
+        condition: service_healthy
+    # Share the firewalled network namespace; do not give yoli its own network.
+    network_mode: "service:netfw"
+    working_dir: /work
+    volumes:
+      - ${YOLI_WORKDIR:-.}:/work
+      # Mount the host yoli config (read-only) so yoli reads stored keys and
+      # default_model itself. The container runs as root -> /root/.config/yoli.
+      # Override the host path with YOLI_CONFIG_DIR if it lives elsewhere.
+      - ${YOLI_CONFIG_DIR:-$HOME/.config/yoli}:/root/.config/yoli:ro
+    environment:
+      # Env vars override the config file when set; otherwise the mounted
+      # config above supplies the credentials.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+
+networks:
+  egress:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.255.0/24

@@ -1,0 +1,7 @@
+*.log
+.DS_Store
+.yolium/
+.yolium.json
+
+# Built binary
+/yoli

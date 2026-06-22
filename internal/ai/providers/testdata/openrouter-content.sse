@@ -1,0 +1,12 @@
+: keep-alive
+
+data: {"choices":[{"delta":{"role":"assistant","content":"Hel"}}]}
+
+data: {"choices":[{"delta":{"content":"lo "}}]}
+
+data: {"choices":[{"delta":{"content":"world"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+

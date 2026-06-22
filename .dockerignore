@@ -1,0 +1,11 @@
+.git
+.gitignore
+.yolium
+*.log
+.DS_Store
+Dockerfile
+.dockerignore
+docs
+README.md
+LICENSE
+/yoli
