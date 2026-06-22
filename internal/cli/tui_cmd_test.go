@@ -419,6 +419,21 @@ func TestTuiLineEditor(t *testing.T) {
 		}
 	})
 
+	t.Run("normalizePaste folds CR and CRLF to LF", func(t *testing.T) {
+		cases := map[string]string{
+			"a\r\nb":    "a\nb",
+			"a\rb":      "a\nb",
+			"a\nb":      "a\nb",
+			"x\r\ny\rz": "x\ny\nz",
+			"no breaks": "no breaks",
+		}
+		for in, want := range cases {
+			if got := normalizePaste(in); got != want {
+				t.Errorf("normalizePaste(%q) = %q, want %q", in, got, want)
+			}
+		}
+	})
+
 	t.Run("historyDown navigates correctly", func(t *testing.T) {
 		e := &tuiLineEditor{
 			stdout:  bufio.NewWriter(io.Discard),

@@ -135,8 +135,9 @@ type tuiLineEditor struct {
 	stdout  *bufio.Writer // buffered stdout writer
 	history []string      // prompt history (oldest first)
 	histIdx int           // current position in history (-1 = new prompt)
-	prompt  string        // current input buffer
+	prompt  string        // current input buffer (may contain '\n' from paste)
 	cursor  int           // cursor position within prompt (0 = beginning)
+	curRow  int           // visual row of the cursor within the rendered buffer
 }
 
 // newTUILineEditor creates a line editor if stdin is a terminal.
@@ -186,10 +187,21 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 	}
 	defer term.Restore(e.stdin, prev)
 
+	// Enable bracketed paste so the terminal wraps pasted text in
+	// ESC[200~ … ESC[201~. Without this, embedded newlines arrive as bare
+	// CR/LF and the first one submits the line, truncating the paste.
+	e.stdout.WriteString("\x1b[?2004h")
+	e.stdout.Flush()
+	defer func() {
+		e.stdout.WriteString("\x1b[?2004l")
+		e.stdout.Flush()
+	}()
+
 	// Reset state for new line
 	e.prompt = ""
 	e.cursor = 0
 	e.histIdx = -1
+	e.curRow = 0
 
 	for {
 		ch := make([]byte, 1)
@@ -213,6 +225,10 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 		case 13, 10: // Enter (CR or LF)
 			result := e.prompt
 			e.addToHistory(result)
+			// Move the cursor past the last rendered row so the newline
+			// lands below all content rather than mid-buffer.
+			e.cursor = len(e.prompt)
+			e.redrawLine()
 			e.stdout.WriteString("\r\n")
 			e.stdout.Flush()
 			return result, false, nil
@@ -224,32 +240,53 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 				e.redrawLine()
 			}
 
-		case 27: // Escape sequence (arrows, etc.)
-			// Try to read escape sequence with timeout
-			// Standard arrow keys: ESC [ A/B/C/D
-			// Some terminals might send longer sequences
-			seq := make([]byte, 2)
-			n, err := os.Stdin.Read(seq)
-			if err != nil || n < 2 {
+		case 27: // Escape sequence (arrows, bracketed paste, etc.)
+			// CSI sequences start with ESC '['. Arrow keys are a single
+			// final byte (A/B/C/D); paste markers are ESC[200~ / ESC[201~.
+			b0, err := e.readByte()
+			if err != nil || b0 != '[' {
 				continue
 			}
-			if seq[0] == '[' {
-				switch seq[1] {
-				case 'A': // Up arrow
-					e.historyUp()
-				case 'B': // Down arrow
-					e.historyDown()
-				case 'C': // Right arrow
-					if e.cursor < len(e.prompt) {
-						e.cursor++
-						e.redrawLine()
+			b1, err := e.readByte()
+			if err != nil {
+				continue
+			}
+			switch b1 {
+			case 'A': // Up arrow
+				e.historyUp()
+			case 'B': // Down arrow
+				e.historyDown()
+			case 'C': // Right arrow
+				if e.cursor < len(e.prompt) {
+					e.cursor++
+					e.redrawLine()
+				}
+			case 'D': // Left arrow
+				if e.cursor > 0 {
+					e.cursor--
+					e.redrawLine()
+				}
+			default:
+				if b1 < '0' || b1 > '9' {
+					continue
+				}
+				// Numeric CSI sequence: read digits up to the final byte.
+				params := []byte{b1}
+				for {
+					nb, err := e.readByte()
+					if err != nil {
+						break
 					}
-				case 'D': // Left arrow
-					if e.cursor > 0 {
-						e.cursor--
-						e.redrawLine()
+					params = append(params, nb)
+					if nb < '0' || nb > '9' {
+						break
 					}
 				}
+				if string(params) == "200~" {
+					e.insertPaste()
+				}
+				// "201~" (stray paste-end) and other CSI sequences are
+				// ignored.
 			}
 		default:
 			// Regular character - insert at cursor
@@ -295,16 +332,104 @@ func (e *tuiLineEditor) historyDown() {
 	e.redrawLine()
 }
 
-// redrawLine redraws the current line with cursor positioning.
-func (e *tuiLineEditor) redrawLine() {
-	// Move cursor to beginning of line, clear line, print prompt, move cursor
-	e.stdout.WriteString("\r\x1b[K> " + e.prompt)
-	// Move cursor to correct position after the prompt
-	if e.cursor < len(e.prompt) {
-		// Move cursor back
-		back := len(e.prompt) - e.cursor
-		fmt.Fprintf(e.stdout, "\x1b[%dD", back)
+// readByte reads a single byte from stdin in raw mode.
+func (e *tuiLineEditor) readByte() (byte, error) {
+	var b [1]byte
+	n, err := os.Stdin.Read(b[:])
+	if n == 0 && err == nil {
+		err = io.EOF
 	}
+	return b[0], err
+}
+
+// readN reads up to n bytes, returning early on error.
+func (e *tuiLineEditor) readN(n int) []byte {
+	out := make([]byte, 0, n)
+	for len(out) < n {
+		b, err := e.readByte()
+		if err != nil {
+			break
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// normalizePaste folds CR and CRLF to LF so pasted line breaks live in the
+// buffer as '\n' rather than carriage returns.
+func normalizePaste(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	return strings.ReplaceAll(s, "\r", "\n")
+}
+
+// insertPaste consumes a bracketed-paste payload (already past the ESC[200~
+// marker) up to the ESC[201~ terminator and inserts it at the cursor,
+// preserving embedded newlines instead of submitting on the first one.
+func (e *tuiLineEditor) insertPaste() {
+	var buf []byte
+	for {
+		b, err := e.readByte()
+		if err != nil {
+			break
+		}
+		if b == 27 { // possible end marker ESC[201~
+			seq := e.readN(5)
+			if string(seq) == "[201~" {
+				break
+			}
+			// Not the terminator: keep the ESC and what followed as
+			// literal content.
+			buf = append(buf, 27)
+			buf = append(buf, seq...)
+			continue
+		}
+		buf = append(buf, b)
+	}
+	s := normalizePaste(string(buf))
+	e.prompt = e.prompt[:e.cursor] + s + e.prompt[e.cursor:]
+	e.cursor += len(s)
+	e.redrawLine()
+}
+
+// redrawLine redraws the current buffer, which may span multiple rows when
+// it contains newlines from a paste. It assumes no single logical line
+// exceeds the terminal width (line wrapping is not accounted for).
+func (e *tuiLineEditor) redrawLine() {
+	// Return to the first rendered row, then clear it and everything below.
+	if e.curRow > 0 {
+		fmt.Fprintf(e.stdout, "\x1b[%dA", e.curRow)
+	}
+	e.stdout.WriteString("\r\x1b[J")
+
+	// Print the buffer, prefixing the first row with "> " and breaking
+	// rows with CRLF (raw mode needs the explicit carriage return).
+	lines := strings.Split(e.prompt, "\n")
+	for i, ln := range lines {
+		if i == 0 {
+			e.stdout.WriteString("> " + ln)
+		} else {
+			e.stdout.WriteString("\r\n" + ln)
+		}
+	}
+
+	// Locate the cursor's target row/column from its byte offset.
+	before := e.prompt[:e.cursor]
+	targetRow := strings.Count(before, "\n")
+	col := len(before) - (strings.LastIndexByte(before, '\n') + 1)
+	if targetRow == 0 {
+		col += 2 // account for the "> " prefix
+	}
+
+	// The cursor currently sits at the end of the last row; move it to the
+	// target position.
+	if up := (len(lines) - 1) - targetRow; up > 0 {
+		fmt.Fprintf(e.stdout, "\x1b[%dA", up)
+	}
+	e.stdout.WriteString("\r")
+	if col > 0 {
+		fmt.Fprintf(e.stdout, "\x1b[%dC", col)
+	}
+	e.curRow = targetRow
 	e.stdout.Flush()
 }
 
