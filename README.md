@@ -6,9 +6,6 @@ https://github.com/user-attachments/assets/93ee9f20-f867-400a-9ccf-06af28e14edd
 
 > **⚠️ Experimental:** This project is in early development and may have breaking changes, bugs, or incomplete features. Use at your own risk.
 
-> **Note:** yoli has only been developed and tested on Arch Linux. It should
-> work on other Linux distributions, but those are currently unverified.
-
 ## Why yoli
 
 A coding agent reads your files, runs shell commands, and reaches the network,
@@ -162,6 +159,9 @@ one with `--session <path|id>`, or fork with `--fork <path|id>`. See
 
 Provider credentials and defaults can also be stored via `yoli config set`
 so they persist across shells. See [docs/configuration.md](docs/configuration.md).
+
+> **Note:** yoli has only been developed and tested on Arch Linux. It should
+> work on other Linux distributions, but those are currently unverified.
 
 ## Tests
 
