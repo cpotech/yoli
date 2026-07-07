@@ -13,22 +13,27 @@ import (
 )
 
 // ConfigKeys is the canonical list of known configuration keys, in the
-// order they should appear in `yoli config list` output.
+// order they should appear in `yoli config list` output. Keys that have
+// an env-var counterpart use the env-var name directly so config-file
+// and environment names are identical.
 var ConfigKeys = []string{
 	"default_provider",
-	"default_model",
+	"YOLI_MODEL",
 	"default_role",
-	"openrouter_api_key",
-	"brave_api_key",
+	"YOLI_BASE_URL",
+	"YOLI_API_KEY",
+	"BRAVE_API_KEY",
 	"subagent_max_depth",
 }
 
-// envBindings maps a config key to the env var it can populate via
-// ApplyEnvDefaults. Keys missing from the map are file-only.
-var envBindings = map[string]string{
-	"openrouter_api_key": "OPENROUTER_API_KEY",
+// renamedKeys maps retired config keys to their replacements so
+// filterKnown can auto-migrate values.
+var renamedKeys = map[string]string{
+	"openrouter_api_key": "YOLI_API_KEY",
+	"api_key":            "YOLI_API_KEY",
+	"base_url":           "YOLI_BASE_URL",
 	"brave_api_key":      "BRAVE_API_KEY",
-	"default_model":      "OPENROUTER_MODEL",
+	"default_model":      "YOLI_MODEL",
 }
 
 // Config is the merged, in-memory form of a yoli configuration. A
@@ -170,6 +175,16 @@ func filterKnown(in Config, sourceLabel string, warnings io.Writer) Config {
 		}
 		fmt.Fprintf(warnings, "warning: ignoring unknown config keys in %s: %s\n",
 			sourceLabel, joinComma(unknown))
+		for _, k := range unknown {
+			if newKey, ok := renamedKeys[k]; ok {
+				if _, exists := known[newKey]; !exists {
+					known[newKey] = in[k]
+				}
+				fmt.Fprintf(warnings,
+					"warning: config key %q was renamed to %q — value auto-migrated\n",
+					k, newKey)
+			}
+		}
 	}
 	return known
 }
@@ -188,11 +203,7 @@ func joinComma(items []string) string {
 func readFromEnv() Config {
 	out := Config{}
 	for _, key := range ConfigKeys {
-		envName, ok := envBindings[key]
-		if !ok {
-			continue
-		}
-		if v := os.Getenv(envName); v != "" {
+		if v := os.Getenv(key); v != "" {
 			out[key] = v
 		}
 	}
@@ -289,15 +300,13 @@ func GetEffectiveConfig(opts LoadOptions) ([]EffectiveEntry, error) {
 }
 
 // ApplyEnvDefaults exports config values to the process environment
-// for keys with an env binding, without ever overwriting a value
-// already set in the environment.
+// without ever overwriting a value already set in the environment.
+// Config keys that match env-var names are set directly; file-only
+// keys (e.g. default_provider) are harmless no-ops.
 func ApplyEnvDefaults(cfg Config) {
-	for key, envName := range envBindings {
-		if os.Getenv(envName) != "" {
-			continue
-		}
-		if v, ok := cfg[key]; ok {
-			_ = os.Setenv(envName, v)
+	for key, v := range cfg {
+		if os.Getenv(key) == "" {
+			_ = os.Setenv(key, v)
 		}
 	}
 }

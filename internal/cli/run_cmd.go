@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"yoli/internal/agent"
-	"yoli/internal/ai/providers"
 )
 
 func parseRunFlags(args []string) (string, error) {
@@ -60,19 +59,11 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		return 1
 	}
 	ApplyEnvDefaults(cfg)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	if !requireAPIKey(stderr) {
 		return 1
 	}
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = defaultModel
-	}
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  os.Getenv("OPENROUTER_API_KEY"),
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli",
-	})
+	model := os.Getenv("YOLI_MODEL")
+	provider, err := newProviderFromEnv("Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

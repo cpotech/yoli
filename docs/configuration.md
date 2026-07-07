@@ -7,7 +7,7 @@ taking precedence:
 2. **User config** — `~/.config/yoli/config.json` (or
    `$XDG_CONFIG_HOME/yoli/config.json` if `XDG_CONFIG_HOME` is set).
 3. **Project config** — `.yolirc.json` in the current working directory.
-4. **Environment** — `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, etc.
+4. **Environment** — `YOLI_API_KEY`, `YOLI_MODEL`, etc.
 
 The effective value of every key, plus the source it came from, is visible
 through `yoli config list`.
@@ -17,13 +17,19 @@ through `yoli config list`.
 | Key | Env var | Purpose |
 |---|---|---|
 | `default_provider` | — | Reserved: one of `openrouter`, `faux`. Not yet read by `chat`/`run`. |
-| `default_model` | `OPENROUTER_MODEL` | Model identifier passed to OpenRouter. Exported into the env by `ApplyEnvDefaults`. |
+| `default_model` | `YOLI_MODEL` | Model identifier sent to the backend verbatim. Exported into the env by `ApplyEnvDefaults`. |
 | `default_role` | — | Reserved: default role prompt for `yoli run`. Not yet read by `run`. |
-| `openrouter_api_key` | `OPENROUTER_API_KEY` | Credential for OpenRouter. Exported into the env by `ApplyEnvDefaults`. |
+| `base_url` | `YOLI_BASE_URL` | Any OpenAI-compatible endpoint (required). See [self-hosting.md](self-hosting.md). Exported into the env by `ApplyEnvDefaults`. |
+| `api_key` | `YOLI_API_KEY` | Credential for the endpoint, sent as `Authorization: Bearer <key>`. Exported into the env by `ApplyEnvDefaults`. |
 | `brave_api_key` | `BRAVE_API_KEY` | Credential for the `WebSearch` tool (Brave Search API). Exported into the env by `ApplyEnvDefaults`. |
 | `subagent_max_depth` | — | Reserved: maximum nesting depth for the `Agent` tool. |
 
 Unknown keys in a config file are ignored with a warning on stderr.
+
+> **Migration note:** the `openrouter_api_key` key and the
+> `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` env vars were retired in favor
+> of the provider-neutral `api_key` / `YOLI_API_KEY` / `YOLI_MODEL` above.
+> Stale config files trigger a rename hint on stderr.
 
 ## Working with config from the CLI
 
@@ -52,8 +58,8 @@ mapping known keys to string values:
 ```json
 {
   "default_provider": "openrouter",
-  "default_model": "openrouter:openai/gpt-4o",
-  "openrouter_api_key": "sk-or-v1-…"
+  "default_model": "openai/gpt-4o",
+  "api_key": "sk-or-v1-…"
 }
 ```
 

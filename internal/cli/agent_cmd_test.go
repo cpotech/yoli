@@ -28,16 +28,9 @@ func TestAgent_ModelFromEnvPassthrough(t *testing.T) {
 	}
 }
 
-func TestAgent_ModelEmptyDefaultsToOpenRouterFree(t *testing.T) {
-	t.Setenv("AGENT_MODEL", "")
-	if got := resolveModel(""); got != "openrouter/free" {
-		t.Fatalf("resolveModel(\"\") = %q, want openrouter/free", got)
-	}
-}
-
 func TestAgent_NoPromptSourcePrintsUsage(t *testing.T) {
 	r := runCli(t, []string{"agent"}, runOpts{
-		extraEnv: map[string]string{"OPENROUTER_API_KEY": "k"},
+		extraEnv: map[string]string{"YOLI_API_KEY": "k"},
 	})
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
@@ -52,7 +45,7 @@ func TestAgent_MissingAPIKeyErrors(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }

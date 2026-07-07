@@ -17,10 +17,7 @@ import (
 	"yoli/internal/agent/tools"
 	"yoli/internal/agent/yolium"
 	"yoli/internal/ai"
-	"yoli/internal/ai/providers"
 )
-
-const defaultModel = "openrouter/free"
 
 const agentUsage = `Usage: yoli agent [--model <slug>] [--tools <comma-separated>] [--prompt-file <file>] [--prompt <text>] [--yolium-mode] [--events-fd <N>]
 
@@ -38,12 +35,13 @@ Flags:
                      discarded). Yolium passes fd=3.
 
 Environment:
-  AGENT_MODEL          Model slug (default: openrouter/free)
+  AGENT_MODEL          Model slug (required)
   AGENT_TOOLS          Comma-separated tool whitelist (default: all)
   AGENT_PROMPT_FILE    Path to prompt file
   AGENT_PROMPT         Base64-encoded prompt text
   AGENT_GOAL           Base64-encoded goal description
-  OPENROUTER_API_KEY   Required
+  YOLI_API_KEY         Required
+  YOLI_BASE_URL        OpenAI-compatible endpoint (required)
   YOLIUM_CAVEMAN_MODE  off | lite | full | ultra (yolium-mode only)
 `
 
@@ -250,16 +248,13 @@ func (p *usageRecordingProvider) Cumulative() ai.Usage {
 	return p.total
 }
 
-// resolveModel returns the model slug, preferring the flag, then AGENT_MODEL,
-// then the free default. The slug is passed through to OpenRouter unchanged.
+// resolveModel returns the model slug from the flag or AGENT_MODEL env var.
+// Returns empty string when neither is set.
 func resolveModel(flagModel string) string {
 	if flagModel != "" {
 		return flagModel
 	}
-	if m := os.Getenv("AGENT_MODEL"); m != "" {
-		return m
-	}
-	return defaultModel
+	return os.Getenv("AGENT_MODEL")
 }
 
 // resolveRepoPath returns the working directory the agent operates on.
@@ -334,14 +329,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	}
 	ApplyEnvDefaults(cfg)
 
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		if k, ok := cfg["openrouter_api_key"]; ok && k != "" {
-			apiKey = k
-		}
-	}
-	if apiKey == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	if !requireAPIKey(stderr) {
 		return 1
 	}
 
@@ -358,11 +346,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "yoli: goal=%s\n", goal)
 	}
 
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  apiKey,
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli Agent",
-	})
+	provider, err := newProviderFromEnv("Yoli Agent")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

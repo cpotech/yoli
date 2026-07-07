@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Run yoli inside a container against the current directory.
 # Builds the image on first use (or when FORCE_BUILD=1), then runs yoli
-# with the current working directory mounted at /work and OPENROUTER_API_KEY
+# with the current working directory mounted at /work and YOLI_API_KEY
 # forwarded. All arguments are passed straight through to yoli, e.g.:
 #
 #   scripts/yoli-docker.sh chat "list the files here"
 #   scripts/yoli-docker.sh            # no args -> interactive tui
 #
-# Credentials: OPENROUTER_API_KEY (and BRAVE_API_KEY) are read from the
-# environment if set; otherwise the host's yoli config at
+# Credentials: YOLI_API_KEY, YOLI_BASE_URL, YOLI_MODEL (and BRAVE_API_KEY)
+# are read from the environment if set; otherwise the host's yoli config at
 # ~/.config/yoli/config.json is mounted into the container so yoli reads the
 # stored keys (and default_model) itself. Environment variables take priority.
 #
@@ -91,10 +91,18 @@ fi
 
 # Forward the API key from the environment if present (overrides the config
 # file). Only warn when neither source can supply it.
-if [[ -n "${OPENROUTER_API_KEY:-}" ]]; then
-  run_args+=(-e OPENROUTER_API_KEY)
+if [[ -n "${YOLI_API_KEY:-}" ]]; then
+  run_args+=(-e YOLI_API_KEY)
 elif [[ ! -f "$config_file" ]]; then
-  echo "yoli-docker: warning: OPENROUTER_API_KEY is not set and no config at $config_file" >&2
+  echo "yoli-docker: warning: YOLI_API_KEY is not set and no config at $config_file" >&2
+fi
+
+# Forward the endpoint and model overrides from the environment if present.
+if [[ -n "${YOLI_BASE_URL:-}" ]]; then
+  run_args+=(-e YOLI_BASE_URL)
+fi
+if [[ -n "${YOLI_MODEL:-}" ]]; then
+  run_args+=(-e YOLI_MODEL)
 fi
 
 # Forward the Brave Search key from the environment if present.

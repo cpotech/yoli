@@ -41,7 +41,7 @@ func stubServer(t *testing.T, h http.HandlerFunc) (*httptest.Server, *recordedRe
 	return srv, rec
 }
 
-func newProvider(t *testing.T, srv *httptest.Server, opts OpenRouterOptions) *OpenRouterProvider {
+func newProvider(t *testing.T, srv *httptest.Server, opts OpenAICompatOptions) *OpenAICompatProvider {
 	t.Helper()
 	if opts.APIKey == "" {
 		opts.APIKey = "k"
@@ -49,9 +49,9 @@ func newProvider(t *testing.T, srv *httptest.Server, opts OpenRouterOptions) *Op
 	if opts.BaseURL == "" {
 		opts.BaseURL = srv.URL
 	}
-	p, err := NewOpenRouterProvider(opts)
+	p, err := NewOpenAICompatProvider(opts)
 	if err != nil {
-		t.Fatalf("NewOpenRouterProvider: %v", err)
+		t.Fatalf("NewOpenAICompatProvider: %v", err)
 	}
 	return p
 }
@@ -94,26 +94,26 @@ func jsonChoicesResponse(w http.ResponseWriter, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// --- exports & identity ---
-
-func TestOpenRouterID(t *testing.T) {
-	if OpenRouterID != "openrouter" {
-		t.Fatalf("OpenRouterID = %q, want %q", OpenRouterID, "openrouter")
-	}
-}
-
 // --- constructor ---
 
-func TestNewOpenRouterProvider_MissingAPIKey(t *testing.T) {
-	t.Setenv("OPENROUTER_API_KEY", "")
-	_, err := NewOpenRouterProvider(OpenRouterOptions{})
-	if err == nil || !strings.Contains(err.Error(), "OPENROUTER_API_KEY") {
-		t.Fatalf("err = %v, want one mentioning OPENROUTER_API_KEY", err)
+func TestNewOpenAICompatProvider_MissingAPIKey(t *testing.T) {
+	t.Setenv("YOLI_API_KEY", "")
+	_, err := NewOpenAICompatProvider(OpenAICompatOptions{BaseURL: "http://localhost"})
+	if err == nil || !strings.Contains(err.Error(), "YOLI_API_KEY") {
+		t.Fatalf("err = %v, want one mentioning YOLI_API_KEY", err)
 	}
 }
 
-func TestNewOpenRouterProvider_ReadsAPIKeyFromEnv(t *testing.T) {
-	t.Setenv("OPENROUTER_API_KEY", "env-key")
+func TestNewOpenAICompatProvider_MissingBaseURL(t *testing.T) {
+	t.Setenv("YOLI_API_KEY", "k")
+	_, err := NewOpenAICompatProvider(OpenAICompatOptions{})
+	if err == nil || !strings.Contains(err.Error(), "YOLI_BASE_URL") {
+		t.Fatalf("err = %v, want one mentioning YOLI_BASE_URL", err)
+	}
+}
+
+func TestNewOpenAICompatProvider_ReadsAPIKeyFromEnv(t *testing.T) {
+	t.Setenv("YOLI_API_KEY", "env-key")
 	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		jsonChoicesResponse(w, map[string]any{
 			"choices": []any{
@@ -121,7 +121,7 @@ func TestNewOpenRouterProvider_ReadsAPIKeyFromEnv(t *testing.T) {
 			},
 		})
 	})
-	p, err := NewOpenRouterProvider(OpenRouterOptions{BaseURL: srv.URL})
+	p, err := NewOpenAICompatProvider(OpenAICompatOptions{BaseURL: srv.URL})
 	if err != nil {
 		t.Fatalf("ctor: %v", err)
 	}
@@ -133,8 +133,8 @@ func TestNewOpenRouterProvider_ReadsAPIKeyFromEnv(t *testing.T) {
 	}
 }
 
-func TestNewOpenRouterProvider_OptionAPIKeyBeatsEnv(t *testing.T) {
-	t.Setenv("OPENROUTER_API_KEY", "env-key")
+func TestNewOpenAICompatProvider_OptionAPIKeyBeatsEnv(t *testing.T) {
+	t.Setenv("YOLI_API_KEY", "env-key")
 	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		jsonChoicesResponse(w, map[string]any{
 			"choices": []any{
@@ -142,7 +142,7 @@ func TestNewOpenRouterProvider_OptionAPIKeyBeatsEnv(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{APIKey: "opt-key"})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "opt-key"})
 	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestChat_PostsCompletionsWithBearerAuthAndJSONBody(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{APIKey: "sk-test"})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "sk-test"})
 
 	if _, err := p.Chat(context.Background(), ai.ChatRequest{
 		Model:    "openai/gpt-4o-mini",
@@ -211,7 +211,7 @@ func TestChat_SendsMaxTokensWhenSet(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	req := userReq("x")
 	req.MaxTokens = 4096
@@ -236,7 +236,7 @@ func TestChat_OmitsMaxTokensWhenZero(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -251,7 +251,7 @@ func TestChat_OmitsMaxTokensWhenZero(t *testing.T) {
 	}
 }
 
-func TestChat_StripsOpenRouterPrefixFromModelID(t *testing.T) {
+func TestChat_PassesModelIDThroughVerbatim(t *testing.T) {
 	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		jsonChoicesResponse(w, map[string]any{
 			"choices": []any{
@@ -259,17 +259,17 @@ func TestChat_StripsOpenRouterPrefixFromModelID(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	if _, err := p.Chat(context.Background(), ai.ChatRequest{
-		Model:    "openrouter:openai/gpt-4o-mini",
+		Model:    "Qwen/Qwen2.5-Coder-32B-Instruct",
 		Messages: []ai.Message{{Role: ai.RoleUser, Content: strPtr("x")}},
 	}); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
 	var body map[string]any
 	_ = json.Unmarshal(rec.Body, &body)
-	if body["model"] != "openai/gpt-4o-mini" {
-		t.Fatalf("model = %v, want openai/gpt-4o-mini", body["model"])
+	if body["model"] != "Qwen/Qwen2.5-Coder-32B-Instruct" {
+		t.Fatalf("model = %v, want Qwen/Qwen2.5-Coder-32B-Instruct", body["model"])
 	}
 }
 
@@ -296,7 +296,7 @@ func TestChat_DecodesToolCallsToCamelCase(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	res, err := p.Chat(context.Background(), userReq("list"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -318,7 +318,7 @@ func TestChat_SerialisesAssistantToolCallsAndToolRepliesSnakeCase(t *testing.T) 
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	if _, err := p.Chat(context.Background(), ai.ChatRequest{
 		Model: "m",
@@ -379,7 +379,7 @@ func TestChat_ErrorOnNon2xxIncludesStatus(t *testing.T) {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte("nope"))
 	})
-	p := newProvider(t, srv, OpenRouterOptions{APIKey: "bad"})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "bad"})
 	_, err := p.Chat(context.Background(), userReq("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v, want one containing 401", err)
@@ -394,7 +394,7 @@ func TestChat_StripsTrailingSlashFromBaseURL(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{BaseURL: srv.URL + "/"})
+	p := newProvider(t, srv, OpenAICompatOptions{BaseURL: srv.URL + "/"})
 	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -411,7 +411,7 @@ func TestChat_AddsRefererAndTitleHeaders(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{
+	p := newProvider(t, srv, OpenAICompatOptions{
 		Referer: "https://yoli.dev",
 		Title:   "Yoli",
 	})
@@ -434,7 +434,7 @@ func TestChatStream_SendsStreamTrueAndAcceptHeader(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(body)
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	seq, err := p.ChatStream(context.Background(), userReq("hi"))
 	if err != nil {
@@ -460,7 +460,7 @@ func TestChatStream_YieldsContentChunksInOrder(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(body)
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	seq, err := p.ChatStream(context.Background(), userReq("hi"))
 	if err != nil {
@@ -491,7 +491,7 @@ func TestChatStream_YieldsMergedToolCallChunks(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(body)
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	seq, err := p.ChatStream(context.Background(), userReq("go"))
 	if err != nil {
@@ -532,7 +532,7 @@ func TestChatStream_YieldsFinishChunkWithReason(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write(body)
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	seq, err := p.ChatStream(context.Background(), userReq("go"))
 	if err != nil {
@@ -562,7 +562,7 @@ func TestChat_ParsesUsageTokens(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(loadFixture(t, "openrouter-usage.json"))
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	res, err := p.Chat(context.Background(), userReq("hi"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -586,7 +586,7 @@ func TestChat_ParsesUsageCost(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(loadFixture(t, "openrouter-usage.json"))
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	res, err := p.Chat(context.Background(), userReq("hi"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -604,7 +604,7 @@ func TestChat_UsagePopulatedForFreeModelZeroCost(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(loadFixture(t, "openrouter-usage-free.json"))
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	res, err := p.Chat(context.Background(), userReq("hi"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -625,7 +625,7 @@ func TestChat_UsageNilWhenOmitted(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(loadFixture(t, "openrouter-usage-no-cost.json"))
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 	res, err := p.Chat(context.Background(), userReq("hi"))
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -646,7 +646,7 @@ func TestChat_SendsUsageIncludeInRequestBody(t *testing.T) {
 			},
 		})
 	})
-	p := newProvider(t, srv, OpenRouterOptions{})
+	p := newProvider(t, srv, OpenAICompatOptions{})
 
 	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
 		t.Fatalf("Chat: %v", err)
@@ -671,7 +671,7 @@ func TestChatStream_ErrorOnNon2xxIncludesStatus(t *testing.T) {
 		w.WriteHeader(401)
 		_, _ = w.Write(body)
 	})
-	p := newProvider(t, srv, OpenRouterOptions{APIKey: "bad"})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "bad"})
 
 	_, err := p.ChatStream(context.Background(), userReq("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {

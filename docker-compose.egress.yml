@@ -7,7 +7,8 @@
 # yoli's traffic — every protocol, not just HTTP.
 #
 # Usage:
-#   export OPENROUTER_API_KEY=...        # required
+#   export YOLI_API_KEY=...              # required
+#   export YOLI_BASE_URL=...             # optional, OpenAI-compatible endpoint
 #   export BRAVE_API_KEY=...             # optional, for web search
 #   docker compose -f docker-compose.egress.yml run --rm yoli            # tui
 #   docker compose -f docker-compose.egress.yml run --rm yoli chat "hi"  # one-shot
@@ -60,7 +61,9 @@ services:
     environment:
       # Env vars override the config file when set; otherwise the mounted
       # config above supplies the credentials.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      YOLI_API_KEY: ${YOLI_API_KEY:-}
+      YOLI_BASE_URL: ${YOLI_BASE_URL:-}
+      YOLI_MODEL: ${YOLI_MODEL:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
 
 networks:

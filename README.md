@@ -52,16 +52,17 @@ use and runs yoli with the current directory mounted. Arguments pass straight
 through to yoli:
 
 ```bash
-export OPENROUTER_API_KEY=...           # your key
+export YOLI_API_KEY=...           # your key
 scripts/yoli-docker.sh       # interactive tui
 FORCE_BUILD=1 scripts/yoli-docker.sh ... # rebuild the image first
 ```
 
-Credentials come from one of two places: `OPENROUTER_API_KEY` (and
-`BRAVE_API_KEY`) forwarded from your environment, or — if those aren't set —
-your host config at `~/.config/yoli/config.json`, which the script mounts
-read-only so yoli reads the stored keys and `default_model` itself. Set them
-once with `yoli config set` and the container picks them up. See
+Credentials come from one of two places: `YOLI_API_KEY` (plus the optional
+`YOLI_BASE_URL`, `YOLI_MODEL`, and `BRAVE_API_KEY`) forwarded from your
+environment, or — if those aren't set — your host config at
+`~/.config/yoli/config.json`, which the script mounts read-only so yoli
+reads the stored keys and `default_model` itself. Set them once with
+`yoli config set` and the container picks them up. See
 [docs/configuration.md](docs/configuration.md).
 
 ### Locking down the network (firewall)
@@ -72,7 +73,7 @@ endpoints are blocked; no inbound access.** Just add `FIREWALL=1` to the
 wrapper script:
 
 ```bash
-export OPENROUTER_API_KEY=...                 # required
+export YOLI_API_KEY=...                       # required
 FIREWALL=1 scripts/yoli-docker.sh             # interactive tui
 FIREWALL=1 scripts/yoli-docker.sh chat "hi"   # one-shot chat
 ```
@@ -89,7 +90,7 @@ rules to tighten the policy.
 cmd/yoli/                 # main package → `yoli` binary
 internal/
   ai/                     # provider-agnostic chat types + Provider interface
-    providers/            # openrouter, faux
+    providers/            # openai-compatible (OpenRouter, vLLM, …), faux
   agent/                  # agent loop, roles, stdio runner
     context/              # AGENTS.md loader
     session/              # JSONL session store (branching, fork/resume)
@@ -128,7 +129,7 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 
 | Flag | Equivalent env var | Description |
 |---|---|---|
-| `--model <slug>` | `AGENT_MODEL` | OpenRouter model slug (default: `openrouter/free`). |
+| `--model <slug>` | `AGENT_MODEL` | Model identifier, sent to the backend verbatim (default: `openrouter/free`). |
 | `--tools <a,b,c>` | `AGENT_TOOLS` | Comma-separated tool whitelist; defaults to all tools except `ask_question` (which is always excluded in headless mode). |
 | `--prompt <text>` | `AGENT_PROMPT` (base64) | Inline prompt text. |
 | `--prompt-file <path>` | `AGENT_PROMPT_FILE` | Read prompt from a file. |
@@ -137,7 +138,8 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `--fork <path\|id>` | `AGENT_FORK` | Fork a source session into a new session whose `parentSession` is the source. |
 | `--continue` | `AGENT_CONTINUE` | Continue the most recent session for the cwd. |
 | `--no-session` | *(none)* | Run without writing a session file. |
-| *(env only)* | `OPENROUTER_API_KEY` | Required. May also come from `yoli config set openrouter_api_key`. |
+| *(env only)* | `YOLI_API_KEY` | Required. May also come from `yoli config set api_key`. |
+| *(env only)* | `YOLI_BASE_URL` | Optional OpenAI-compatible endpoint; defaults to OpenRouter. See [docs/self-hosting.md](docs/self-hosting.md). |
 
 Output is the Yolium NDJSON protocol (`progress` and `complete` events), not Claude Code's `stream-json`. There is no `--output-format`, `--allowedTools`, `--dangerously-skip-permissions`, or `--verbose` flag.
 
@@ -154,11 +156,14 @@ one with `--session <path|id>`, or fork with `--fork <path|id>`. See
 
 | Provider | Required env var |
 |---|---|
-| `openrouter` | `OPENROUTER_API_KEY` |
+| openai-compatible (default: OpenRouter) | `YOLI_API_KEY` (endpoint override: `YOLI_BASE_URL`) |
 | `faux` | none (deterministic stub for tests) |
 
-Provider credentials and defaults can also be stored via `yoli config set`
-so they persist across shells. See [docs/configuration.md](docs/configuration.md).
+Any OpenAI-compatible endpoint works — point `base_url` at a self-hosted
+vLLM server (e.g. on a RunPod GPU pod); see
+[docs/self-hosting.md](docs/self-hosting.md). Provider credentials and
+defaults can also be stored via `yoli config set` so they persist across
+shells. See [docs/configuration.md](docs/configuration.md).
 
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.

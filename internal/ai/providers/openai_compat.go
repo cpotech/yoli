@@ -15,18 +15,9 @@ import (
 	"yoli/internal/ai"
 )
 
-// OpenRouterID is the canonical id string for the OpenRouter provider.
-const OpenRouterID = "openrouter"
-
-const (
-	openRouterModelPrefix    = OpenRouterID + ":"
-	openRouterDefaultBaseURL = "https://openrouter.ai/api/v1"
-)
-
-// OpenRouterOptions configures a new OpenRouterProvider. All fields are
-// optional; an empty struct is valid as long as OPENROUTER_API_KEY is set
-// in the environment.
-type OpenRouterOptions struct {
+// OpenAICompatOptions configures a new OpenAICompatProvider. BaseURL is
+// required (set via YOLI_BASE_URL or the config file).
+type OpenAICompatOptions struct {
 	APIKey     string
 	BaseURL    string
 	HTTPClient *http.Client
@@ -34,9 +25,9 @@ type OpenRouterOptions struct {
 	Title      string
 }
 
-// OpenRouterProvider speaks the OpenAI-compatible API exposed by
-// openrouter.ai/api/v1.
-type OpenRouterProvider struct {
+// OpenAICompatProvider speaks the OpenAI-compatible /chat/completions
+// API served by OpenRouter, vLLM, and other self-hosted backends.
+type OpenAICompatProvider struct {
 	apiKey  string
 	baseURL string
 	client  *http.Client
@@ -44,28 +35,30 @@ type OpenRouterProvider struct {
 	title   string
 }
 
-// NewOpenRouterProvider validates options and returns a ready provider.
+// NewOpenAICompatProvider validates options and returns a ready provider.
 // Returns an error if no API key is available via opts or environment.
-func NewOpenRouterProvider(opts OpenRouterOptions) (*OpenRouterProvider, error) {
+func NewOpenAICompatProvider(opts OpenAICompatOptions) (*OpenAICompatProvider, error) {
 	key := opts.APIKey
 	if key == "" {
-		key = os.Getenv("OPENROUTER_API_KEY")
+		key = os.Getenv("YOLI_API_KEY")
 	}
 	if key == "" {
 		return nil, errors.New(
-			"OpenRouter API key missing — set the OPENROUTER_API_KEY env var or pass opts.APIKey",
+			"API key missing — set the YOLI_API_KEY env var or pass opts.APIKey",
 		)
 	}
 	baseURL := opts.BaseURL
 	if baseURL == "" {
-		baseURL = openRouterDefaultBaseURL
+		return nil, errors.New(
+			"base URL missing — set the YOLI_BASE_URL env var, the config file, or pass opts.BaseURL",
+		)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	client := opts.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &OpenRouterProvider{
+	return &OpenAICompatProvider{
 		apiKey:  key,
 		baseURL: baseURL,
 		client:  client,
@@ -75,7 +68,7 @@ func NewOpenRouterProvider(opts OpenRouterOptions) (*OpenRouterProvider, error) 
 }
 
 // Chat performs a non-streaming completion.
-func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
+func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
 	resp, err := p.send(ctx, req, false)
 	if err != nil {
 		return ai.ChatResponse{}, err
@@ -84,7 +77,7 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.C
 
 	var wire wireResponse
 	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
-		return ai.ChatResponse{}, fmt.Errorf("openrouter: decode response: %w", err)
+		return ai.ChatResponse{}, fmt.Errorf("provider: decode response: %w", err)
 	}
 
 	var content *string
@@ -122,7 +115,7 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.C
 // ChatStream performs a streaming completion. The outer error covers
 // transport / non-2xx failures; mid-stream issues surface through the
 // iterator's error channel.
-func (p *OpenRouterProvider) ChatStream(
+func (p *OpenAICompatProvider) ChatStream(
 	ctx context.Context, req ai.ChatRequest,
 ) (iter.Seq2[ai.ChatStreamChunk, error], error) {
 	resp, err := p.send(ctx, req, true)
@@ -174,17 +167,16 @@ func (p *OpenRouterProvider) ChatStream(
 	return seq, nil
 }
 
-func (p *OpenRouterProvider) send(
+func (p *OpenAICompatProvider) send(
 	ctx context.Context, req ai.ChatRequest, stream bool,
 ) (*http.Response, error) {
-	model := strings.TrimPrefix(req.Model, openRouterModelPrefix)
-
 	wireMsgs := make([]any, len(req.Messages))
 	for i, m := range req.Messages {
 		wireMsgs[i] = toWireMessage(m)
 	}
 
-	body := wireRequest{Model: model, Messages: wireMsgs}
+	// The model id is sent to the backend verbatim.
+	body := wireRequest{Model: req.Model, Messages: wireMsgs}
 	if len(req.Tools) > 0 {
 		body.Tools = make([]wireTool, len(req.Tools))
 		for i, t := range req.Tools {
@@ -201,7 +193,7 @@ func (p *OpenRouterProvider) send(
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: marshal request: %w", err)
+		return nil, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(
@@ -210,7 +202,7 @@ func (p *OpenRouterProvider) send(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: build request: %w", err)
+		return nil, fmt.Errorf("provider: build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -226,13 +218,13 @@ func (p *OpenRouterProvider) send(
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: request failed: %w", err)
+		return nil, fmt.Errorf("provider: request failed: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		text, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		msg := fmt.Sprintf(
-			"openrouter: request failed: %d %s",
+			"provider: request failed: %d %s",
 			resp.StatusCode, http.StatusText(resp.StatusCode),
 		)
 		if len(text) > 0 {
@@ -356,6 +348,6 @@ func derefString(s *string) string {
 
 // Compile-time interface checks.
 var (
-	_ ai.Provider          = (*OpenRouterProvider)(nil)
-	_ ai.StreamingProvider = (*OpenRouterProvider)(nil)
+	_ ai.Provider          = (*OpenAICompatProvider)(nil)
+	_ ai.StreamingProvider = (*OpenAICompatProvider)(nil)
 )

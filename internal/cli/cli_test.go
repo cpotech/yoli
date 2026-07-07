@@ -55,7 +55,7 @@ func runCli(t *testing.T, args []string, opts runOpts) runResult {
 		"YOLI_CLI_TEST_HELPER=1",
 		"HOME=" + home,
 		"PATH=" + os.Getenv("PATH"),
-		"OPENROUTER_API_KEY=",
+		"YOLI_API_KEY=",
 	}
 	for k, v := range opts.extraEnv {
 		env = append(env, k+"="+v)
@@ -151,7 +151,7 @@ func TestTUI_MissingAPIKeyErrors(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -185,7 +185,7 @@ func TestChat_MissingAPIKeyErrors(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -202,14 +202,14 @@ func TestChat_DashPAliasMissingPrompt(t *testing.T) {
 
 func TestChat_DashPAliasReachesAPIKeyCheck(t *testing.T) {
 	r := runCli(t, []string{"-p", "hello"}, runOpts{})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
 
 func TestChat_LongPromptAliasAlsoAccepted(t *testing.T) {
 	r := runCli(t, []string{"--prompt", "hello"}, runOpts{})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -217,7 +217,7 @@ func TestChat_LongPromptAliasAlsoAccepted(t *testing.T) {
 func TestChat_NoSessionSkipsSessionFileCreation(t *testing.T) {
 	home := t.TempDir()
 	r := runCli(t, []string{"chat", "--no-session", "hello"}, runOpts{home: home})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".yoli", "agent", "sessions")); !os.IsNotExist(err) {
@@ -298,7 +298,7 @@ func TestRun_ValidRoleErrorsWithoutAPIKey(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -308,7 +308,7 @@ func TestRun_EqualsFormAccepted(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -581,17 +581,17 @@ func TestConfig_ListEnvOverridesProject(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, ".yolirc.json"),
-		[]byte(`{"openrouter_api_key":"project-key"}`), 0o644); err != nil {
+		[]byte(`{"YOLI_API_KEY":"project-key"}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	r := runCli(t, []string{"config", "list"}, runOpts{
 		home: home, cwd: cwd,
-		extraEnv: map[string]string{"OPENROUTER_API_KEY": "env-key"},
+		extraEnv: map[string]string{"YOLI_API_KEY": "env-key"},
 	})
 	if r.exitCode != 0 {
 		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
 	}
-	re := regexp.MustCompile(`openrouter_api_key\s*=\s*env-key\s+\(env\)`)
+	re := regexp.MustCompile(`YOLI_API_KEY\s*=\s*env-key\s+\(env\)`)
 	if !re.MatchString(r.stdout) {
 		t.Fatalf("missing env label: %q", r.stdout)
 	}

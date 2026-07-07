@@ -19,7 +19,7 @@ type SubAgentOptions struct {
 	// `<CLIEntry> run --role <role>` with the prompt on stdin, behaves as
 	// a Yoli sub-agent.
 	CLIEntry string
-	// DefaultModel, if non-empty, is exported as OPENROUTER_MODEL in the
+	// DefaultModel, if non-empty, is exported as YOLI_MODEL in the
 	// child's environment.
 	DefaultModel string
 	// MaxDepth caps recursion. Zero means the default (3).
@@ -113,13 +113,13 @@ func (t *SubAgentTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 }
 
 // childEnv returns a copy of parent with YOLI_SUBAGENT_DEPTH set to depth
-// and (if non-empty) OPENROUTER_MODEL set to model. Existing entries with
+// and (if non-empty) YOLI_MODEL set to model. Existing entries with
 // these keys are overridden.
 func childEnv(parent []string, depth int, model string) []string {
 	out := make([]string, 0, len(parent)+2)
 	skip := map[string]bool{"YOLI_SUBAGENT_DEPTH": true}
 	if model != "" {
-		skip["OPENROUTER_MODEL"] = true
+		skip["YOLI_MODEL"] = true
 	}
 	for _, kv := range parent {
 		eq := strings.IndexByte(kv, '=')
@@ -134,7 +134,7 @@ func childEnv(parent []string, depth int, model string) []string {
 	}
 	out = append(out, "YOLI_SUBAGENT_DEPTH="+strconv.Itoa(depth))
 	if model != "" {
-		out = append(out, "OPENROUTER_MODEL="+model)
+		out = append(out, "YOLI_MODEL="+model)
 	}
 	return out
 }

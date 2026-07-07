@@ -13,7 +13,6 @@ import (
 	agentsession "yoli/internal/agent/session"
 	"yoli/internal/agent/tools"
 	"yoli/internal/ai"
-	"yoli/internal/ai/providers"
 )
 
 const chatUsage = "Usage: yoli chat [--loglevel debug|info|error|none] <prompt>\n"
@@ -213,23 +212,15 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	ApplyEnvDefaults(cfg)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	if !requireAPIKey(stderr) {
 		return 1
 	}
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = defaultModel
-	}
+	model := os.Getenv("YOLI_MODEL")
 	rank := logRank(flags.LogLevel)
 	if rank >= logRankInfo {
 		fmt.Fprintf(stderr, "yoli: model=%s\n", model)
 	}
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  os.Getenv("OPENROUTER_API_KEY"),
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli",
-	})
+	provider, err := newProviderFromEnv("Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
