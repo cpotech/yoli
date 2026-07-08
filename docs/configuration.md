@@ -23,6 +23,8 @@ through `yoli config list`.
 | `api_key` | `YOLI_API_KEY` | Credential for the endpoint, sent as `Authorization: Bearer <key>`. Exported into the env by `ApplyEnvDefaults`. |
 | `brave_api_key` | `BRAVE_API_KEY` | Credential for the `WebSearch` tool (Brave Search API). Exported into the env by `ApplyEnvDefaults`. |
 | `subagent_max_depth` | — | Reserved: maximum nesting depth for the `Agent` tool. |
+| `YOLI_CONTEXT_WINDOW` | `YOLI_CONTEXT_WINDOW` | Total context window in tokens (input + output) the backend accepts. Set this to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom before compacting input, keeping requests within the window. Defaults to 180000. Invalid or non-positive values warn on stderr and fall back to the default. |
+| `YOLI_MAX_TOKENS` | `YOLI_MAX_TOKENS` | Per-turn output-token cap (default 8192). Lower it to leave more of the window for input. Invalid or non-positive values warn on stderr and fall back to the default. |
 
 Unknown keys in a config file are ignored with a warning on stderr.
 

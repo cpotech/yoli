@@ -230,9 +230,24 @@ func (p *OpenAICompatProvider) send(
 		if len(text) > 0 {
 			msg += " — " + string(text)
 		}
+		if isContextOverflow(string(text)) {
+			msg += " (hint: set YOLI_CONTEXT_WINDOW to your server's context limit)"
+		}
 		return nil, errors.New(msg)
 	}
 	return resp, nil
+}
+
+// isContextOverflow reports whether a non-2xx response body reads like a
+// context-window overflow from an OpenAI-compatible backend (vLLM,
+// OpenRouter, …). The phrasing varies by server, so we match the common
+// substrings case-insensitively. This is the discovery path that points
+// the user at YOLI_CONTEXT_WINDOW.
+func isContextOverflow(body string) bool {
+	b := strings.ToLower(body)
+	return strings.Contains(b, "context length") ||
+		strings.Contains(b, "max_model_len") ||
+		strings.Contains(b, "maximum context")
 }
 
 // --- wire types ---

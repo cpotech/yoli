@@ -42,6 +42,12 @@ Environment:
   AGENT_GOAL           Base64-encoded goal description
   YOLI_API_KEY         Required
   YOLI_BASE_URL        OpenAI-compatible endpoint (required)
+  YOLI_CONTEXT_WINDOW  Total context window in tokens (input + output).
+                       Set this to your server's cap (e.g. a vLLM
+                       max_model_len of 32768) so the loop reserves output
+                       headroom instead of overflowing. Default 180000.
+  YOLI_MAX_TOKENS      Per-turn output-token cap (default 8192). Lower it
+                       to leave more of the window for input.
   YOLIUM_CAVEMAN_MODE  off | lite | full | ultra (yolium-mode only)
 `
 
@@ -291,10 +297,10 @@ type agentLoopConfig struct {
 	yoliumMode bool
 	// eventSink receives structured events when yoliumMode is on. Nil
 	// is treated as yolium.NopSink. Standalone runs always use NopSink.
-	eventSink      yolium.EventSink
-	sessionRoot    string
-	sessionTarget  string
-	sessionFork    string
+	eventSink       yolium.EventSink
+	sessionRoot     string
+	sessionTarget   string
+	sessionFork     string
 	sessionContinue bool
 	noSession       bool
 }
@@ -502,7 +508,8 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	messages = append(messages, ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 	_, _ = sess.AppendMessage(ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 
-	fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(messages), agent.DefaultContextBudget))
+	contextWindow, maxTokens := resolveContextLimits(stderr)
+	fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(messages), contextWindow))
 
 	turn := 0
 	// bashCallIDs tracks tool-call IDs whose call name was "Bash" so we
@@ -551,13 +558,15 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	}
 
 	conv, runErr := agent.Run(context.Background(), agent.RunOptions{
-		Provider:   recordingProvider,
-		Model:      c.model,
-		Tools:      allTools,
-		Messages:   messages,
-		OnMessage:  onMessage,
-		Stop:       func() bool { return exit.Pending != nil },
-		YoliumMode: c.yoliumMode,
+		Provider:            recordingProvider,
+		Model:               c.model,
+		Tools:               allTools,
+		Messages:            messages,
+		MaxTokens:           maxTokens,
+		ContextBudgetTokens: contextWindow,
+		OnMessage:           onMessage,
+		Stop:                func() bool { return exit.Pending != nil },
+		YoliumMode:          c.yoliumMode,
 	})
 
 	// Emit cumulative usage

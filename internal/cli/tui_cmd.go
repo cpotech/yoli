@@ -54,6 +54,11 @@ type tuiLoopConfig struct {
 	// handleSignals enables per-turn SIGINT handling so Ctrl-C cancels
 	// the in-flight turn instead of killing the REPL. Off in tests.
 	handleSignals bool
+	// contextWindow is the total context window (input + output) and
+	// maxTokens the per-turn output cap, resolved once at startup so the
+	// Run call and /context agree. Zero falls back to the agent defaults.
+	contextWindow int
+	maxTokens     int
 }
 
 // tuiIsTerminal reports whether f is a character device (a terminal).
@@ -481,11 +486,14 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	contextWindow, maxTokens := resolveContextLimits(stderr)
 	return runTUILoop(tuiLoopConfig{
-		provider: provider,
-		model:    model,
-		tools:    toolset,
-		sess:     sess,
+		provider:      provider,
+		model:         model,
+		tools:         toolset,
+		sess:          sess,
+		contextWindow: contextWindow,
+		maxTokens:     maxTokens,
 		newSession: func() (*agentsession.Session, error) {
 			opts := agentsession.Options{RootDir: flags.SessionRoot, Cwd: cwd}
 			if flags.NoSession {
@@ -625,11 +633,13 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 			sp = startTUISpinner(stderr)
 		}
 		_, runErr := agent.Run(ctx, agent.RunOptions{
-			Provider:  c.provider,
-			Model:     c.model,
-			Tools:     c.tools,
-			Messages:  seed,
-			OnMessage: render,
+			Provider:            c.provider,
+			Model:               c.model,
+			Tools:               c.tools,
+			Messages:            seed,
+			MaxTokens:           c.maxTokens,
+			ContextBudgetTokens: c.contextWindow,
+			OnMessage:           render,
 		})
 		sp.Stop()
 		sp = nil
@@ -680,7 +690,11 @@ func tuiSlashCommand(c *tuiLoopConfig, line, system string, stdout, stderr io.Wr
 	case "/context":
 		seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 		seed = append(seed, c.sess.BuildMessages()...)
-		fmt.Fprintf(stdout, "context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), agent.DefaultContextBudget))
+		window := c.contextWindow
+		if window <= 0 {
+			window = agent.DefaultContextBudget
+		}
+		fmt.Fprintf(stdout, "context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), window))
 	default:
 		fmt.Fprintf(stdout, "unknown command %s — try /help\n", cmd)
 	}

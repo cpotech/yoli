@@ -25,12 +25,17 @@ const DefaultMaxIterations = 64
 
 // RunOptions configures Run.
 type RunOptions struct {
-	Provider            ai.Provider
-	Model               string
-	Tools               []tools.Tool
-	Messages            []ai.Message
-	MaxIterations       int
-	MaxTokens           int
+	Provider      ai.Provider
+	Model         string
+	Tools         []tools.Tool
+	Messages      []ai.Message
+	MaxIterations int
+	MaxTokens     int
+	// ContextBudgetTokens is the TOTAL context window (input + output) the
+	// backend accepts. The loop reserves MaxTokens of output headroom (plus
+	// tool-definition and heuristic margin) out of this window before
+	// compacting input, so input + output stays within the window. Unset
+	// (<= 0) falls back to DefaultContextBudget.
 	ContextBudgetTokens int
 	// OnMessage, if non-nil, is invoked synchronously each time a new
 	// assistant or tool message is appended to the conversation.
@@ -82,6 +87,13 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 		index[def.Name] = t
 	}
 
+	// contextBudget is the TOTAL window (input + output). Reserve output
+	// and tool-definition headroom out of it once so every compaction
+	// targets an input budget that keeps input + MaxTokens within the
+	// window — otherwise the provider rejects the request (e.g. vLLM's
+	// "input N + requested output M > window" HTTP 400).
+	inputBudget := computeInputBudget(contextBudget, maxTokens, estimateToolDefTokens(defs))
+
 	conv := make([]ai.Message, len(opts.Messages))
 	copy(conv, opts.Messages)
 
@@ -111,7 +123,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 
 		req := ai.ChatRequest{
 			Model:     opts.Model,
-			Messages:  compactConversation(conv, contextBudget),
+			Messages:  compactConversation(conv, inputBudget),
 			MaxTokens: maxTokens,
 		}
 		if len(defs) > 0 {
@@ -261,7 +273,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 	// extra round-trip: if it still doesn't terminate — or the provider
 	// errors — we fall through to the original cap error.
 	if opts.YoliumMode {
-		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, contextBudget, max); ok {
+		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, inputBudget, max); ok {
 			return conv, nil
 		}
 	}
@@ -281,7 +293,7 @@ func flushTerminator(
 	conv []ai.Message,
 	index map[string]tools.Tool,
 	defs []ai.ToolDefinition,
-	maxTokens, contextBudget, max int,
+	maxTokens, inputBudget, max int,
 ) ([]ai.Message, bool) {
 	flush := fmt.Sprintf(
 		"You have reached the iteration cap (%d turns). This is your FINAL turn. "+
@@ -298,7 +310,7 @@ func flushTerminator(
 
 	req := ai.ChatRequest{
 		Model:     opts.Model,
-		Messages:  compactConversation(conv, contextBudget),
+		Messages:  compactConversation(conv, inputBudget),
 		MaxTokens: maxTokens,
 	}
 	if len(defs) > 0 {

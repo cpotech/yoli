@@ -24,6 +24,8 @@ var ConfigKeys = []string{
 	"YOLI_API_KEY",
 	"BRAVE_API_KEY",
 	"subagent_max_depth",
+	"YOLI_CONTEXT_WINDOW",
+	"YOLI_MAX_TOKENS",
 }
 
 // renamedKeys maps retired config keys to their replacements so

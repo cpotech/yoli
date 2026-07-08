@@ -267,6 +267,8 @@ func TestConfigKeys_OnlyContainsExpectedKeys(t *testing.T) {
 		"YOLI_API_KEY",
 		"BRAVE_API_KEY",
 		"subagent_max_depth",
+		"YOLI_CONTEXT_WINDOW",
+		"YOLI_MAX_TOKENS",
 	}
 	if !reflect.DeepEqual(ConfigKeys, want) {
 		t.Fatalf("ConfigKeys mismatch:\n got: %v\nwant: %v", ConfigKeys, want)
@@ -276,6 +278,57 @@ func TestConfigKeys_OnlyContainsExpectedKeys(t *testing.T) {
 func TestConfigKeys_ContainsBraveAPIKey(t *testing.T) {
 	if !IsConfigKey("BRAVE_API_KEY") {
 		t.Fatalf("BRAVE_API_KEY should be a known config key")
+	}
+}
+
+func TestConfigKeys_ContainsContextLimitKeys(t *testing.T) {
+	if !IsConfigKey("YOLI_CONTEXT_WINDOW") {
+		t.Fatalf("YOLI_CONTEXT_WINDOW should be a known config key")
+	}
+	if !IsConfigKey("YOLI_MAX_TOKENS") {
+		t.Fatalf("YOLI_MAX_TOKENS should be a known config key")
+	}
+}
+
+func TestSetConfigValue_ContextWindowRoundTrips(t *testing.T) {
+	home := t.TempDir()
+	opts := PathOptions{Home: home}
+	if err := SetConfigValue("YOLI_CONTEXT_WINDOW", "32768", opts); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	cfg, err := ReadConfigFile(ConfigPath(opts))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if cfg["YOLI_CONTEXT_WINDOW"] != "32768" {
+		t.Fatalf("YOLI_CONTEXT_WINDOW = %q, want 32768", cfg["YOLI_CONTEXT_WINDOW"])
+	}
+}
+
+func TestGetEffectiveConfig_ContextLimitSources(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("YOLI_CONTEXT_WINDOW", "")
+	t.Setenv("YOLI_MAX_TOKENS", "4096")
+	writeFile(t, filepath.Join(cwd, ".yolirc.json"),
+		`{"YOLI_CONTEXT_WINDOW": "32768"}`)
+
+	entries, err := GetEffectiveConfig(LoadOptions{
+		PathOptions: PathOptions{Home: home},
+		Cwd:         cwd,
+	})
+	if err != nil {
+		t.Fatalf("effective: %v", err)
+	}
+	byKey := map[string]EffectiveEntry{}
+	for _, e := range entries {
+		byKey[e.Key] = e
+	}
+	if byKey["YOLI_CONTEXT_WINDOW"].Source != SourceProject || byKey["YOLI_CONTEXT_WINDOW"].Value != "32768" {
+		t.Fatalf("YOLI_CONTEXT_WINDOW: %+v", byKey["YOLI_CONTEXT_WINDOW"])
+	}
+	if byKey["YOLI_MAX_TOKENS"].Source != SourceEnv || byKey["YOLI_MAX_TOKENS"].Value != "4096" {
+		t.Fatalf("YOLI_MAX_TOKENS: %+v", byKey["YOLI_MAX_TOKENS"])
 	}
 }
 

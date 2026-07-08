@@ -386,6 +386,58 @@ func TestChat_ErrorOnNon2xxIncludesStatus(t *testing.T) {
 	}
 }
 
+func TestChat_ContextOverflowErrorIncludesHint(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"This model's maximum context length is 32768 tokens. However you requested 32769."}`))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
+	_, err := p.Chat(context.Background(), userReq("x"))
+	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
+		t.Fatalf("err = %v, want one mentioning YOLI_CONTEXT_WINDOW hint", err)
+	}
+}
+
+func TestChat_ContextOverflowHintMatchesMaxModelLen(t *testing.T) {
+	// vLLM phrases the cap as "max_model_len".
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"message":"input 24577 + requested 8192 exceeds max_model_len 32768"}`))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
+	_, err := p.Chat(context.Background(), userReq("x"))
+	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
+		t.Fatalf("err = %v, want YOLI_CONTEXT_WINDOW hint", err)
+	}
+}
+
+func TestChat_UnrelatedErrorHasNoHint(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(401)
+		_, _ = w.Write([]byte("invalid api key"))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "bad"})
+	_, err := p.Chat(context.Background(), userReq("x"))
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
+		t.Fatalf("unrelated error should not carry the hint: %v", err)
+	}
+}
+
+func TestChatStream_ContextOverflowErrorIncludesHint(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(400)
+		_, _ = w.Write([]byte(`{"error":"maximum context length exceeded"}`))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
+	_, err := p.ChatStream(context.Background(), userReq("x"))
+	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
+		t.Fatalf("err = %v, want one mentioning YOLI_CONTEXT_WINDOW hint", err)
+	}
+}
+
 func TestChat_StripsTrailingSlashFromBaseURL(t *testing.T) {
 	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		jsonChoicesResponse(w, map[string]any{

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"yoli/internal/ai"
@@ -19,6 +20,11 @@ const (
 	// died. 8192 matches Anthropic's Sonnet default and is supported
 	// by every OpenAI-compatible provider we route through.
 	DefaultMaxOutputTokens = 8192
+	// DefaultContextBudget is the fallback TOTAL context window (input +
+	// output) when neither RunOptions.ContextBudgetTokens nor
+	// YOLI_CONTEXT_WINDOW is set. The loop reserves output headroom out of
+	// this window before compacting input (see computeInputBudget), so the
+	// requested input + output can never exceed it.
 	DefaultContextBudget   = 180_000
 	DefaultToolOutputBytes = 65_536
 )
@@ -27,6 +33,41 @@ const messageOverheadTokens = 4
 
 func estimateTokens(s string) int {
 	return (len(s) + 3) / 4
+}
+
+// estimateToolDefTokens approximates the token cost of the tool
+// definitions sent as ChatRequest.Tools. That JSON is never part of the
+// conversation messages, so estimateConversationTokens misses it; the
+// loop must account for it when reserving input headroom or a large tool
+// schema can silently push the request over the window.
+func estimateToolDefTokens(defs []ai.ToolDefinition) int {
+	total := 0
+	for _, d := range defs {
+		b, err := json.Marshal(d)
+		if err != nil {
+			continue
+		}
+		total += estimateTokens(string(b))
+	}
+	return total
+}
+
+// computeInputBudget derives the maximum input (prompt) token budget from
+// the total context window, reserving room for the requested output and
+// the tool-definition JSON. reserved output is clamped to half the window
+// so tiny windows (as used by tests) keep usable input room; the result
+// is scaled to 90% to absorb the bytes/4 estimation error and floored at
+// window/10 so oversized tool schemas can never zero or negate it.
+func computeInputBudget(window, maxTokens, toolDefTokens int) int {
+	reserved := maxTokens
+	if half := window / 2; reserved > half {
+		reserved = half
+	}
+	budget := (window - reserved - toolDefTokens) * 9 / 10
+	if floor := window / 10; budget < floor {
+		budget = floor
+	}
+	return budget
 }
 
 func estimateMessageTokens(m ai.Message) int {

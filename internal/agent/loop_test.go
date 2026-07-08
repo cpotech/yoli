@@ -298,6 +298,7 @@ func TestRun_TruncatesOldToolResultsOverBudget(t *testing.T) {
 		Tools:               []tools.Tool{noop},
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -340,6 +341,7 @@ func TestRun_PreservesToolCallIDPairingDuringCompaction(t *testing.T) {
 		Model:               "m",
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -382,6 +384,7 @@ func TestRun_TruncatesOldAssistantContentWhenToolCompactionInsufficient(t *testi
 		Model:               "m",
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -392,6 +395,46 @@ func TestRun_TruncatesOldAssistantContentWhenToolCompactionInsufficient(t *testi
 	}
 	if got[3].Content == nil || !strings.Contains(*got[3].Content, "[truncated: ") {
 		t.Fatalf("old tool content was not compacted: %+v", got[3])
+	}
+}
+
+func TestRun_ReservesOutputHeadroomWithinWindow(t *testing.T) {
+	// Regression for the vLLM 32768 cap. The loop must compact input so
+	// that estimated input + requested output never exceeds the TOTAL
+	// window. Before the output-headroom fix, compaction targeted the
+	// full window, so a conversation just under the window was sent
+	// unchanged and input+MaxTokens overflowed — the original
+	// "input 24577 + requested output 8192 > 32768" HTTP 400.
+	const window = 32768
+	const maxTokens = 8192
+	big := strings.Repeat("x", 30000) // ~7500 tokens per tool result
+	messages := []ai.Message{
+		{Role: ai.RoleSystem, Content: ptr("system")},
+		{Role: ai.RoleTool, ToolCallID: "c1", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c2", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c3", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c4", Content: ptr(big)},
+		userMsg("recent 1"),
+		userMsg("recent 2"),
+		userMsg("recent 3"),
+		userMsg("recent 4"),
+	}
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("done")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            messages,
+		ContextBudgetTokens: window,
+		MaxTokens:           maxTokens,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	sent := prov.calls[0].Messages
+	if input := EstimateContextTokens(sent); input+maxTokens > window {
+		t.Fatalf("input %d + output %d exceeds window %d", input, maxTokens, window)
 	}
 }
 

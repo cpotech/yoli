@@ -244,8 +244,9 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 	seed = append(seed, sess.BuildMessages()...)
 	seed = append(seed, ai.Message{Role: ai.RoleUser, Content: &user})
+	contextWindow, maxTokens := resolveContextLimits(stderr)
 	if rank >= logRankInfo {
-		fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), agent.DefaultContextBudget))
+		fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), contextWindow))
 	}
 	if _, err := sess.AppendMessage(ai.Message{Role: ai.RoleUser, Content: &user}); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -253,10 +254,12 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	}
 	nameByID := map[string]string{}
 	messages, err := agent.Run(context.Background(), agent.RunOptions{
-		Provider: provider,
-		Model:    model,
-		Tools:    toolset,
-		Messages: seed,
+		Provider:            provider,
+		Model:               model,
+		Tools:               toolset,
+		Messages:            seed,
+		MaxTokens:           maxTokens,
+		ContextBudgetTokens: contextWindow,
 		OnMessage: func(m ai.Message) {
 			if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
 				_, _ = sess.AppendMessage(m)

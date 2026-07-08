@@ -140,6 +140,8 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `--no-session` | *(none)* | Run without writing a session file. |
 | *(env only)* | `YOLI_API_KEY` | Required. May also come from `yoli config set api_key`. |
 | *(env only)* | `YOLI_BASE_URL` | Optional OpenAI-compatible endpoint; defaults to OpenRouter. See [docs/self-hosting.md](docs/self-hosting.md). |
+| *(env only)* | `YOLI_CONTEXT_WINDOW` | Total context window in tokens (input + output). Set to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom and never overflows. Default 180000. |
+| *(env only)* | `YOLI_MAX_TOKENS` | Per-turn output-token cap (default 8192); lower it to leave more of the window for input. |
 
 Output is the Yolium NDJSON protocol (`progress` and `complete` events), not Claude Code's `stream-json`. There is no `--output-format`, `--allowedTools`, `--dangerously-skip-permissions`, or `--verbose` flag.
 
