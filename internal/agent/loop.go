@@ -98,6 +98,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 	copy(conv, opts.Messages)
 
 	budgetWarned := false
+	abortRetried := false
 	for i := 0; i < max; i++ {
 		// Budget warning: once the loop crosses ~80% of its iteration
 		// cap, inject a one-time heads-up so the model wraps up and
@@ -123,7 +124,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 
 		req := ai.ChatRequest{
 			Model:     opts.Model,
-			Messages:  compactConversation(conv, inputBudget),
+			Messages:  compactConversation(scrubAbortedToolCallTags(conv), inputBudget),
 			MaxTokens: maxTokens,
 		}
 		if len(defs) > 0 {
@@ -132,6 +133,31 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 		resp, err := opts.Provider.Chat(ctx, req)
 		if err != nil {
 			return conv, err
+		}
+
+		// Models that emit tool calls as inline XML (e.g. Qwen3-Coder)
+		// sometimes abort one mid-emission: the content ends with a
+		// dangling `<tool_call>` tag, the server-side parser finds no
+		// complete block, and the response carries no structured tool
+		// calls. Storing that content verbatim poisons the session — the
+		// model imitates the `text… <tool_call> <eos>` pattern from its
+		// own history on every later turn and never calls a tool again.
+		// Strip the fragment before the message is stored or rendered,
+		// and give the model one fresh attempt at the turn since the
+		// aborted response carries no actionable content.
+		aborted := false
+		if resp.Content != nil {
+			var clean string
+			if clean, aborted = stripAbortedToolCallTag(*resp.Content); aborted {
+				resp.Content = &clean
+			}
+		}
+		if aborted && len(resp.ToolCalls) == 0 && !abortRetried {
+			abortRetried = true
+			continue
+		}
+		if !aborted {
+			abortRetried = false
 		}
 
 		assistant := ai.Message{
@@ -310,7 +336,7 @@ func flushTerminator(
 
 	req := ai.ChatRequest{
 		Model:     opts.Model,
-		Messages:  compactConversation(conv, inputBudget),
+		Messages:  compactConversation(scrubAbortedToolCallTags(conv), inputBudget),
 		MaxTokens: maxTokens,
 	}
 	if len(defs) > 0 {
@@ -319,6 +345,14 @@ func flushTerminator(
 	resp, err := opts.Provider.Chat(ctx, req)
 	if err != nil {
 		return conv, false
+	}
+
+	// Single-shot wrap-up turn: no retry budget here, but still strip an
+	// aborted `<tool_call>` fragment so it can't be stored in the session.
+	if resp.Content != nil {
+		if clean, aborted := stripAbortedToolCallTag(*resp.Content); aborted {
+			resp.Content = &clean
+		}
 	}
 
 	assistant := ai.Message{Role: ai.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls}
@@ -362,6 +396,59 @@ const yoliumProtocolMarker = "@@YOLIUM:"
 // in that situation.
 func containsYoliumProtocolText(content string) bool {
 	return strings.Contains(content, yoliumProtocolMarker)
+}
+
+// stripAbortedToolCallTag removes an aborted inline tool-call fragment
+// from assistant content: a `<tool_call>` opening tag with no matching
+// `</tool_call>` after it, plus everything following it (a partial
+// `<function=…` body included). Complete, properly closed blocks are
+// left untouched — those were deliberate text, not an abort. Returns
+// the cleaned content and whether a fragment was stripped.
+func stripAbortedToolCallTag(content string) (string, bool) {
+	const openTag, closeTag = "<tool_call>", "</tool_call>"
+	search := 0
+	for {
+		i := strings.Index(content[search:], openTag)
+		if i < 0 {
+			return content, false
+		}
+		i += search
+		rest := i + len(openTag)
+		j := strings.Index(content[rest:], closeTag)
+		if j < 0 {
+			return strings.TrimRight(content[:i], " \t\r\n"), true
+		}
+		search = rest + j + len(closeTag)
+	}
+}
+
+// scrubAbortedToolCallTags applies stripAbortedToolCallTag to every
+// assistant message before the conversation is sent to the provider.
+// New turns are already sanitized at store time; this pass heals
+// history that predates the sanitizer (e.g. sessions saved by older
+// builds) so a poisoned session recovers on its next turn instead of
+// teaching the model the aborted pattern forever. Copy-on-write: the
+// caller's slice and messages are never mutated.
+func scrubAbortedToolCallTags(conv []ai.Message) []ai.Message {
+	out := conv
+	copied := false
+	for i, m := range conv {
+		if m.Role != ai.RoleAssistant || m.Content == nil {
+			continue
+		}
+		clean, aborted := stripAbortedToolCallTag(*m.Content)
+		if !aborted {
+			continue
+		}
+		if !copied {
+			out = make([]ai.Message, len(conv))
+			copy(out, conv)
+			copied = true
+		}
+		c := clean
+		out[i].Content = &c
+	}
+	return out
 }
 
 func compactConversation(conv []ai.Message, budget int) []ai.Message {

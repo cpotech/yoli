@@ -209,6 +209,128 @@ func TestRun_SanitizesTruncatedToolCallArgumentsBeforeReplay(t *testing.T) {
 	}
 }
 
+func TestRun_RetriesAbortedInlineToolCallOnce(t *testing.T) {
+	// Reproduction of the real failure against vLLM + Qwen3-Coder: the
+	// model emits its inline `<tool_call>` tag and then immediately
+	// stops, so the server-side parser returns the dangling tag as plain
+	// content with no structured tool calls. The loop must discard that
+	// turn, retry once, and never store or emit the fragment.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("Let me check the files:\n<tool_call>")},
+		{ToolCalls: []ai.ToolCall{{ID: "c1", Name: "echo", Arguments: `{}`}}},
+		{Content: ptr("done")},
+	}}
+	echo := &fnTool{
+		def: ai.ToolDefinition{Name: "echo", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil },
+	}
+	var seen []ai.Message
+	conv, err := Run(context.Background(), RunOptions{
+		Provider:  prov,
+		Model:     "m",
+		Tools:     []tools.Tool{echo},
+		Messages:  []ai.Message{userMsg("list files")},
+		OnMessage: func(m ai.Message) { seen = append(seen, m) },
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 3 {
+		t.Fatalf("provider calls = %d, want 3 (initial, retry, post-tool)", len(prov.calls))
+	}
+	for _, m := range append(conv, seen...) {
+		if m.Content != nil && strings.Contains(*m.Content, "<tool_call>") {
+			t.Fatalf("dangling <tool_call> leaked into stored/emitted message: %q", *m.Content)
+		}
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "done" {
+		t.Fatalf("last message = %+v, want final 'done' reply", last)
+	}
+}
+
+func TestRun_AbortedInlineToolCallNotRetriedTwice(t *testing.T) {
+	// If the retry ALSO comes back as an aborted inline tool call, keep
+	// the sanitized text and terminate normally — no retry storm.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("first try\n<tool_call>")},
+		{Content: ptr("second try\n<tool_call>")},
+	}}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (initial + single retry)", len(prov.calls))
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "second try" {
+		t.Fatalf("last content = %v, want sanitized 'second try'", last.Content)
+	}
+}
+
+func TestRun_CompleteInlineToolCallBlockLeftUntouched(t *testing.T) {
+	// A properly closed <tool_call>…</tool_call> block in content is
+	// deliberate text (e.g. the model quoting its own format), not an
+	// abort: no strip, no retry.
+	text := "here is the syntax: <tool_call>example</tool_call> — got it?"
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr(text)},
+	}}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("explain")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no retry)", len(prov.calls))
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != text {
+		t.Fatalf("content = %v, want untouched %q", last.Content, text)
+	}
+}
+
+func TestRun_ScrubsPoisonedHistoryFromOutgoingRequests(t *testing.T) {
+	// Sessions saved by builds without the store-time sanitizer contain
+	// assistant turns ending in a dangling <tool_call> tag. Replaying
+	// them verbatim teaches the model to imitate the aborted pattern, so
+	// the outgoing request must carry scrubbed copies — while the
+	// caller's seed messages stay untouched.
+	poisoned := "I'll check the config.\n<tool_call>"
+	seed := []ai.Message{
+		userMsg("what is the context window?"),
+		{Role: ai.RoleAssistant, Content: ptr(poisoned)},
+		userMsg("continue"),
+	}
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("final")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: seed,
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	for _, m := range prov.calls[0].Messages {
+		if m.Content != nil && strings.Contains(*m.Content, "<tool_call>") {
+			t.Fatalf("outgoing request still contains poisoned content: %q", *m.Content)
+		}
+	}
+	if *seed[1].Content != poisoned {
+		t.Fatalf("caller's seed message was mutated: %q", *seed[1].Content)
+	}
+}
+
 func TestRun_ExecutesToolCallThenContinues(t *testing.T) {
 	prov := &scriptedProvider{responses: []ai.ChatResponse{
 		{ToolCalls: []ai.ToolCall{{ID: "call_1", Name: "echo", Arguments: `{"text":"hi"}`}}},
