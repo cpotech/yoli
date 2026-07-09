@@ -3,6 +3,9 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -199,6 +202,164 @@ func TestRunAgentLoop_StandaloneMode_NoYoliumToolsRegistered(t *testing.T) {
 				t.Fatalf("standalone run leaked yolium tool: %s", td.Name)
 			}
 		}
+	}
+}
+
+// guardGitRun runs a git subcommand inside root as deterministic test
+// setup (identity pinned by initGuardWorktree; failures are fatal).
+func guardGitRun(t *testing.T, root string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("setup: git %v: %v\n%s", args, err, out)
+	}
+}
+
+// initGuardWorktree prepares a git repo at root with one committed file,
+// mimicking a fresh Yolium worktree before the agent starts.
+func initGuardWorktree(t *testing.T, root string) {
+	t.Helper()
+	for _, c := range [][]string{
+		{"init", "-q"},
+		{"symbolic-ref", "HEAD", "refs/heads/main"},
+		{"config", "user.email", "yoli-test@example.com"},
+		{"config", "user.name", "Yoli Test"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		guardGitRun(t, root, c...)
+	}
+	if err := os.WriteFile(filepath.Join(root, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base.txt: %v", err)
+	}
+	guardGitRun(t, root, "add", "base.txt")
+	guardGitRun(t, root, "commit", "-q", "-m", "base")
+}
+
+// TestRunAgentLoop_YoliumMode_CompleteGuardForcesCommit exercises the
+// dirty-worktree guard end-to-end: the first yolium_complete is rejected
+// with a corrective tool result, the model commits via the real Bash
+// tool, and the retried yolium_complete then succeeds.
+func TestRunAgentLoop_YoliumMode_CompleteGuardForcesCommit(t *testing.T) {
+	root := t.TempDir()
+	initGuardWorktree(t, root)
+	if err := os.WriteFile(filepath.Join(root, "work.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatalf("write work.txt: %v", err)
+	}
+
+	var stdout, stderr, events bytes.Buffer
+	prov := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
+		{
+			ToolCalls: []ai.ToolCall{{
+				ID:        "c1",
+				Name:      yolium.ToolComplete,
+				Arguments: `{"summary":"done"}`,
+			}},
+		},
+		{
+			ToolCalls: []ai.ToolCall{{
+				ID:        "b1",
+				Name:      "Bash",
+				Arguments: `{"command":"git add -A && git commit -q -m 'feat: work'"}`,
+			}},
+		},
+		{
+			ToolCalls: []ai.ToolCall{{
+				ID:        "c2",
+				Name:      yolium.ToolComplete,
+				Arguments: `{"summary":"done"}`,
+			}},
+		},
+	})}
+
+	code := runAgentLoop(agentLoopConfig{
+		provider:   prov,
+		model:      "faux",
+		prompt:     "go",
+		repoPath:   root,
+		yoliumMode: true,
+		eventSink:  yolium.NewNDJSONSink(&events),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if n := countSubstr(events.String(), `"type":"complete"`); n != 1 {
+		t.Fatalf("complete events=%d want 1; events=%q", n, events.String())
+	}
+	// The rejection must have reached the model as a corrective tool
+	// result in the request following the first complete attempt.
+	if len(prov.reqs) < 2 {
+		t.Fatalf("reqs=%d want >=2", len(prov.reqs))
+	}
+	rejected := false
+	for _, m := range prov.reqs[1].Messages {
+		if m.Role == ai.RoleTool && m.Content != nil &&
+			strings.Contains(*m.Content, "uncommitted change") &&
+			strings.Contains(*m.Content, "work.txt") {
+			rejected = true
+		}
+	}
+	if !rejected {
+		t.Fatal("second request must carry the dirty-worktree rejection naming work.txt")
+	}
+	if yolium.WorktreeBlocksComplete(context.Background(), root) {
+		t.Fatal("worktree must be clean after the forced commit")
+	}
+}
+
+// TestRunAgentLoop_YoliumMode_TextCompleteSuppressedWhenDirty verifies
+// the text-protocol bypass is closed: a `@@YOLIUM:{"type":"complete"}`
+// line in assistant prose must not end a dirty run (nor be re-emitted on
+// stdout where Yolium's parser would see it). The run only completes
+// after a real commit and a yolium_complete tool call.
+func TestRunAgentLoop_YoliumMode_TextCompleteSuppressedWhenDirty(t *testing.T) {
+	root := t.TempDir()
+	initGuardWorktree(t, root)
+	if err := os.WriteFile(filepath.Join(root, "work.txt"), []byte("work\n"), 0o644); err != nil {
+		t.Fatalf("write work.txt: %v", err)
+	}
+
+	var stdout, stderr, events bytes.Buffer
+	prov := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strp(`@@YOLIUM:{"type":"complete","summary":"claimed without commit"}`)},
+		{
+			ToolCalls: []ai.ToolCall{{
+				ID:        "b1",
+				Name:      "Bash",
+				Arguments: `{"command":"git add -A && git commit -q -m 'feat: work'"}`,
+			}},
+		},
+		{
+			ToolCalls: []ai.ToolCall{{
+				ID:        "c1",
+				Name:      yolium.ToolComplete,
+				Arguments: `{"summary":"done"}`,
+			}},
+		},
+	})
+
+	code := runAgentLoop(agentLoopConfig{
+		provider:   prov,
+		model:      "faux",
+		prompt:     "go",
+		repoPath:   root,
+		yoliumMode: true,
+		eventSink:  yolium.NewNDJSONSink(&events),
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit=%d stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "claimed without commit") {
+		t.Fatalf("suppressed text complete leaked to stdout: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "text complete suppressed") {
+		t.Fatalf("expected suppression note on stderr: %q", stderr.String())
+	}
+	if n := countSubstr(events.String(), `"type":"complete"`); n != 1 {
+		t.Fatalf("complete events=%d want 1; events=%q", n, events.String())
+	}
+	if !strings.Contains(events.String(), `"summary":"done"`) {
+		t.Fatalf("final complete must be the tool call's: %q", events.String())
 	}
 }
 

@@ -49,6 +49,9 @@ Environment:
   YOLI_MAX_TOKENS      Per-turn output-token cap (default 8192). Lower it
                        to leave more of the window for input.
   YOLIUM_CAVEMAN_MODE  off | lite | full | ultra (yolium-mode only)
+  YOLI_COMPLETE_GUARD  Set to "off" to disable the dirty-worktree guard
+                       that rejects completion while uncommitted git
+                       changes exist (yolium-mode only)
 `
 
 type agentFlags struct {
@@ -438,7 +441,7 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// tools (progress, comment, etc.) emit structured events via the
 	// EventSink and return short acks.
 	if c.yoliumMode {
-		allTools = append(allTools, yolium.NewTools(sink, exit)...)
+		allTools = append(allTools, yolium.NewTools(sink, exit, c.repoPath)...)
 	}
 
 	for i, t := range allTools {
@@ -471,8 +474,10 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			"DO NOT emit `@@YOLIUM:{...}` lines as plain text — under " +
 			"--yolium-mode those are ignored. The terminator tools " +
 			"are the ONLY way to end the loop; a turn with no tool calls " +
-			"is treated as 'keep going'. If you cannot finish the task, " +
-			"call yolium_error with a one-sentence reason."
+			"is treated as 'keep going'. yolium_complete is rejected while " +
+			"uncommitted git changes exist — commit your work (git add + " +
+			"git commit via Bash) before calling it. If you cannot finish " +
+			"the task, call yolium_error with a one-sentence reason."
 	} else {
 		system = "You are Yoli, a headless coding agent. " +
 			"Use the provided tools to inspect and modify the working directory. " +
@@ -519,13 +524,27 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// agent definition docs with example lines) and would otherwise be
 	// misparsed as terminal events.
 	bashCallIDs := make(map[string]bool)
+	// Text-protocol completion guard: under --yolium-mode a complete
+	// line in assistant prose or Bash output is suppressed while the
+	// worktree has uncommitted changes, enforcing the same invariant
+	// as the yolium_complete tool (see yolium/complete_guard.go).
+	suppressTextComplete := func() bool {
+		if !c.yoliumMode {
+			return false
+		}
+		if !yolium.WorktreeBlocksComplete(context.Background(), c.repoPath) {
+			return false
+		}
+		fmt.Fprintln(stderr, "yoli: text complete suppressed: uncommitted changes in worktree")
+		return true
+	}
 	onMessage := func(m ai.Message) {
 		switch m.Role {
 		case ai.RoleAssistant:
 			turn++
 			if m.Content != nil && *m.Content != "" {
 				logAssistantContent(stderr, turn, *m.Content)
-				dispatchAssistantEvents(*m.Content, stdout, exit)
+				dispatchAssistantEvents(*m.Content, stdout, exit, suppressTextComplete)
 				// Under --yolium-mode, mirror the raw assistant text on the
 				// structured EventSink so Yolium can populate its
 				// agentMessageTexts list (used for the "non-Claude provider
@@ -549,7 +568,7 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			if m.Content != nil {
 				logToolResult(stderr, turn, m.ToolCallID, *m.Content)
 				if bashCallIDs[m.ToolCallID] {
-					dispatchBashResultEvents(*m.Content, stdout, exit)
+					dispatchBashResultEvents(*m.Content, stdout, exit, suppressTextComplete)
 					delete(bashCallIDs, m.ToolCallID)
 				}
 			}
@@ -631,8 +650,14 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// `yolium_complete` would silently mark a failed run as done.
 	if runErr == nil {
 		if summary, ok := readExistingSummary(c.repoPath); ok {
-			yolium.Emit(stdout, yolium.CompleteEvent{Summary: summary})
-			return 0
+			// Dirty-worktree guard: a summary file does not excuse
+			// uncommitted work. Fall through to the honest-error path
+			// instead of fabricating a complete for a stranded run.
+			if !c.yoliumMode || !yolium.WorktreeBlocksComplete(context.Background(), c.repoPath) {
+				yolium.Emit(stdout, yolium.CompleteEvent{Summary: summary})
+				return 0
+			}
+			fmt.Fprintln(stderr, "yoli: summary fallback suppressed: uncommitted changes in worktree")
 		}
 	}
 
@@ -749,8 +774,8 @@ func singleLine(s string) string {
 // exit.Pending for the first terminal event (complete / error /
 // question). Subsequent events in the same message after a terminal one
 // are still re-emitted so progress lines aren't lost.
-func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.ExitSignal) {
-	dispatchEvents(content, stdout, exit, true)
+func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, blockComplete func() bool) {
+	dispatchEvents(content, stdout, exit, true, blockComplete)
 }
 
 // dispatchBashResultEvents scans the stdout of a Bash tool call (the
@@ -762,17 +787,23 @@ func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.Exit
 // exists specifically so that a model which insists on using
 // `echo '@@YOLIUM:{"type":"complete",...}'` can still cleanly terminate
 // the loop instead of running until the iteration cap or fallback.
-func dispatchBashResultEvents(content string, stdout io.Writer, exit *yolium.ExitSignal) {
-	dispatchEvents(content, stdout, exit, false)
+func dispatchBashResultEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, blockComplete func() bool) {
+	dispatchEvents(content, stdout, exit, false, blockComplete)
 }
 
 // dispatchEvents is the shared implementation for both assistant-prose
 // and Bash-result scanning. When emitProgress is true, every parsed
 // event is re-emitted on stdout (used for assistant prose). When false,
 // only terminal events are re-emitted (used for Bash results).
-func dispatchEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, emitProgress bool) {
+func dispatchEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, emitProgress bool, blockComplete func() bool) {
 	for _, evt := range yolium.ScanText(content) {
 		kind, summary, message, terminal := yolium.TerminalEvent(evt)
+		if kind == "complete" && blockComplete != nil && blockComplete() {
+			// Dirty-worktree guard: swallow the text-emitted complete
+			// entirely — re-emitting it on stdout would let Yolium's
+			// parser mark the item done while the loop keeps running.
+			continue
+		}
 		if emitProgress || terminal {
 			_ = yolium.Emit(stdout, evt)
 		}

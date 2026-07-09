@@ -39,7 +39,7 @@ func TestDispatchAssistantEvents_CompleteLineSetsExitPending(t *testing.T) {
 	content := `@@YOLIUM:{"type":"progress","step":"work","detail":"doing"}` + "\n" +
 		`@@YOLIUM:{"type":"complete","summary":"all done"}`
 
-	dispatchAssistantEvents(content, &out, exit)
+	dispatchAssistantEvents(content, &out, exit, nil)
 
 	if exit.Pending == nil || exit.Pending.Kind != yolium.ExitPendingComplete {
 		t.Fatalf("expected complete pending, got %+v", exit.Pending)
@@ -61,7 +61,7 @@ func TestDispatchAssistantEvents_ErrorLineSetsExitPending(t *testing.T) {
 	exit := yolium.NewExitSignal()
 	content := `@@YOLIUM:{"type":"error","message":"something broke"}`
 
-	dispatchAssistantEvents(content, &out, exit)
+	dispatchAssistantEvents(content, &out, exit, nil)
 
 	if exit.Pending == nil || exit.Pending.Kind != yolium.ExitPendingError {
 		t.Fatalf("expected error pending, got %+v", exit.Pending)
@@ -76,7 +76,7 @@ func TestDispatchAssistantEvents_QuestionLineSetsExitPending(t *testing.T) {
 	exit := yolium.NewExitSignal()
 	content := `@@YOLIUM:{"type":"ask_question","text":"which?","options":["a","b"]}`
 
-	dispatchAssistantEvents(content, &out, exit)
+	dispatchAssistantEvents(content, &out, exit, nil)
 
 	if exit.Pending == nil || exit.Pending.Kind != yolium.ExitPendingQuestion {
 		t.Fatalf("expected question pending, got %+v", exit.Pending)
@@ -86,10 +86,37 @@ func TestDispatchAssistantEvents_QuestionLineSetsExitPending(t *testing.T) {
 	}
 }
 
+func TestDispatchAssistantEvents_BlockCompleteSuppressesOnlyComplete(t *testing.T) {
+	var out bytes.Buffer
+	exit := yolium.NewExitSignal()
+	content := `@@YOLIUM:{"type":"progress","step":"work","detail":"doing"}` + "\n" +
+		`@@YOLIUM:{"type":"complete","summary":"blocked"}`
+
+	dispatchAssistantEvents(content, &out, exit, func() bool { return true })
+
+	if exit.Pending != nil {
+		t.Fatalf("blocked complete must not set exit.Pending: %+v", exit.Pending)
+	}
+	got := out.String()
+	if strings.Contains(got, `"type":"complete"`) {
+		t.Fatalf("blocked complete must not be re-emitted: %q", got)
+	}
+	if !strings.Contains(got, `"type":"progress"`) {
+		t.Fatalf("non-complete events must still flow: %q", got)
+	}
+
+	// The guard is complete-specific: error terminators always pass.
+	exit = yolium.NewExitSignal()
+	dispatchAssistantEvents(`@@YOLIUM:{"type":"error","message":"boom"}`, &out, exit, func() bool { return true })
+	if exit.Pending == nil || exit.Pending.Kind != yolium.ExitPendingError {
+		t.Fatalf("error must not be blocked: %+v", exit.Pending)
+	}
+}
+
 func TestDispatchAssistantEvents_NoEventsLeavesExitUntouched(t *testing.T) {
 	var out bytes.Buffer
 	exit := yolium.NewExitSignal()
-	dispatchAssistantEvents("just plain prose, no markers", &out, exit)
+	dispatchAssistantEvents("just plain prose, no markers", &out, exit, nil)
 	if exit.Pending != nil {
 		t.Fatalf("expected no pending: %+v", exit.Pending)
 	}
@@ -104,7 +131,7 @@ func TestDispatchAssistantEvents_FirstTerminalWins(t *testing.T) {
 	content := `@@YOLIUM:{"type":"complete","summary":"first"}` + "\n" +
 		`@@YOLIUM:{"type":"error","message":"second"}`
 
-	dispatchAssistantEvents(content, &out, exit)
+	dispatchAssistantEvents(content, &out, exit, nil)
 
 	if exit.Pending == nil || exit.Pending.Kind != yolium.ExitPendingComplete {
 		t.Fatalf("expected complete (first) to win, got %+v", exit.Pending)
