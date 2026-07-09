@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"unicode"
+
+	"yoli/internal/ai"
 )
 
 // NormalizeArgKeys rewrites top-level camelCase JSON object keys to
@@ -68,6 +70,119 @@ func NormalizeArgKeys(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 	return json.RawMessage(encoded)
+}
+
+// NormalizeArgKeysToSchema rewrites top-level argument keys toward the
+// property names DECLARED in the tool's schema, whatever casing the
+// schema uses. NormalizeArgKeys above assumes snake_case is canonical,
+// which mangles tools whose schema parameters are camelCase (the
+// yolium_* protocol tools: itemId, agentName, parentId, …) — a model
+// that calls them exactly as documented would have its keys rewritten
+// to snake_case and silently dropped by the tool's unmarshal.
+//
+// Behaviour:
+//   - Keys already matching a declared property pass through verbatim.
+//   - Unknown keys are remapped to a declared property when their
+//     camel↔snake counterpart matches one (itemId ⇄ item_id).
+//   - On collision the key that already matches the schema wins.
+//   - Keys matching nothing are kept as-is; rejecting them is the
+//     tool's job.
+//   - Definitions with no object properties fall back to the legacy
+//     snake_case normalisation.
+func NormalizeArgKeysToSchema(raw json.RawMessage, def ai.ToolDefinition) json.RawMessage {
+	props := declaredPropertyNames(def)
+	if len(props) == 0 {
+		return NormalizeArgKeys(raw)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return raw
+	}
+	needsRewrite := false
+	for k := range m {
+		if !props[k] {
+			needsRewrite = true
+			break
+		}
+	}
+	if !needsRewrite {
+		return raw
+	}
+	out := make(map[string]json.RawMessage, len(m))
+	// Pass 1: keys that already match the schema pass through verbatim.
+	for k, v := range m {
+		if props[k] {
+			out[k] = v
+		}
+	}
+	// Pass 2: remap unknown keys via their camel/snake counterpart, only
+	// when that name is declared and not already provided.
+	for k, v := range m {
+		if props[k] {
+			continue
+		}
+		target := k
+		if snake := camelToSnake(k); props[snake] {
+			target = snake
+		} else if camel := snakeToCamel(k); props[camel] {
+			target = camel
+		}
+		if _, exists := out[target]; exists {
+			continue
+		}
+		out[target] = v
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return raw
+	}
+	return json.RawMessage(encoded)
+}
+
+// declaredPropertyNames extracts the top-level property names from a
+// tool definition's JSON-schema parameters. Handles both Go-native
+// (map[string]any) definitions and ones that round-tripped through JSON.
+func declaredPropertyNames(def ai.ToolDefinition) map[string]bool {
+	if def.Parameters == nil {
+		return nil
+	}
+	props, ok := def.Parameters["properties"].(map[string]any)
+	if !ok || len(props) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(props))
+	for name := range props {
+		out[name] = true
+	}
+	return out
+}
+
+// snakeToCamel converts a snake_case identifier to lowerCamelCase
+// (item_id → itemId). Leading/trailing underscores are preserved-ish by
+// virtue of empty segments being skipped; inputs without underscores
+// are returned unchanged.
+func snakeToCamel(s string) string {
+	if !strings.Contains(s, "_") {
+		return s
+	}
+	parts := strings.Split(s, "_")
+	var b strings.Builder
+	b.Grow(len(s))
+	first := true
+	for _, p := range parts {
+		if p == "" {
+			continue
+		}
+		if first {
+			b.WriteString(p)
+			first = false
+			continue
+		}
+		r := []rune(p)
+		b.WriteRune(unicode.ToUpper(r[0]))
+		b.WriteString(string(r[1:]))
+	}
+	return b.String()
 }
 
 func hasUpper(s string) bool {

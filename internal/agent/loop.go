@@ -187,6 +187,18 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 					truncated[c.ID] = true
 				}
 			}
+			// finish_reason "length" means the output-token cap cut the
+			// generation mid-emission. Server-side inline-XML parsers
+			// (vLLM + Qwen3-Coder) salvage the cut-off call as a
+			// tool_call with VALID but incomplete arguments — typically
+			// `{}` — which the json.Valid check above cannot catch.
+			// Executing it produces a plausible-looking result that
+			// teaches the model the degenerate call (observed: 54
+			// consecutive `Grep {}` turns). The cap always lands on the
+			// LAST call; earlier calls in the same turn completed first.
+			if resp.FinishReason == "length" {
+				truncated[sanitized[len(sanitized)-1].ID] = true
+			}
 			assistant.ToolCalls = sanitized
 		}
 		conv = append(conv, assistant)
@@ -262,9 +274,9 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 				// with shorter arguments.
 				result = fmt.Sprintf(
 					"Error: arguments for tool %s were truncated mid-response (the model hit its output-token cap "+
-						"before the JSON closed). The call was NOT executed. Retry with shorter arguments — for "+
+						"before the call was fully emitted). The call was NOT executed. Retry with shorter arguments — for "+
 						"Write, emit a smaller file or split the file into multiple Writes; for Edit, make smaller "+
-						"individual edits.",
+						"individual edits; for Grep or Glob, use a short, simple pattern.",
 					call.Name,
 				)
 			} else {
@@ -518,12 +530,67 @@ func runToolCall(ctx context.Context, index map[string]tools.Tool, call ai.ToolC
 			return fmt.Sprintf("Error: invalid JSON arguments for %s: %s", call.Name, err.Error())
 		}
 	}
-	// Normalise camelCase keys (e.g. oldString) to snake_case (old_string)
-	// before dispatch. See tools.NormalizeArgKeys for rationale.
-	args = tools.NormalizeArgKeys(args)
+	// Normalise argument keys toward the property names the tool's own
+	// schema declares (old_string ⇐ oldString for snake_case schemas,
+	// itemId ⇐ item_id for the camelCase yolium_* tools). See
+	// tools.NormalizeArgKeysToSchema for rationale.
+	args = tools.NormalizeArgKeysToSchema(args, tool.Definition())
+	if missing := missingRequiredArgs(tool.Definition(), args); len(missing) > 0 {
+		return fmt.Sprintf(
+			"Error: missing required argument(s) %s for tool %s. The call was NOT executed. "+
+				"Retry the call with every required argument provided.",
+			strings.Join(missing, ", "), call.Name,
+		)
+	}
 	out, err := tool.Run(ctx, args)
 	if err != nil {
 		return fmt.Sprintf("Error running %s: %s", call.Name, err.Error())
 	}
 	return out
+}
+
+// missingRequiredArgs returns the names from the tool schema's `required`
+// list that are absent from args. Weak models — and server-side parsers
+// salvaging an output-cap-truncated call — produce `{}` arguments for
+// tools that require parameters; running those with zero-value defaults
+// yields misleading "successful" results (e.g. an empty Grep pattern
+// matches every file) that teach the model the degenerate call. The
+// `required` value may be []string (Go-native definitions) or []any
+// (definitions that round-tripped through JSON).
+func missingRequiredArgs(def ai.ToolDefinition, args json.RawMessage) []string {
+	required := requiredParamNames(def)
+	if len(required) == 0 {
+		return nil
+	}
+	var provided map[string]json.RawMessage
+	if err := json.Unmarshal(args, &provided); err != nil {
+		// Non-object arguments; leave rejection to the tool itself.
+		return nil
+	}
+	var missing []string
+	for _, name := range required {
+		if _, ok := provided[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+func requiredParamNames(def ai.ToolDefinition) []string {
+	if def.Parameters == nil {
+		return nil
+	}
+	switch req := def.Parameters["required"].(type) {
+	case []string:
+		return req
+	case []any:
+		out := make([]string, 0, len(req))
+		for _, v := range req {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }

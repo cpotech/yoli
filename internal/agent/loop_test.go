@@ -209,6 +209,219 @@ func TestRun_SanitizesTruncatedToolCallArgumentsBeforeReplay(t *testing.T) {
 	}
 }
 
+func TestRun_OutputCapSalvagedToolCallNotExecuted(t *testing.T) {
+	// Reproduction of the real failure against vLLM + Qwen3-Coder in
+	// yolium mode: the model hits its output cap mid-tool-call and the
+	// server-side inline-XML parser salvages the cut-off call as a
+	// tool_call with VALID but empty arguments (`{}`). json.Valid can't
+	// catch that, but the response carries finish_reason "length".
+	// Executing Grep with `{}` returned a plausible full-repo listing
+	// that the model then imitated for 54 straight turns. The salvaged
+	// call must NOT execute; the tool result must explain the
+	// truncation instead.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls:    []ai.ToolCall{{ID: "cap1", Name: "Grep", Arguments: `{}`}},
+			FinishReason: "length",
+		},
+		{Content: ptr("ok, will use a shorter pattern")},
+	}}
+	ran := 0
+	grep := &fnTool{
+		def: ai.ToolDefinition{Name: "Grep", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			ran++
+			return "every file in the repo", nil
+		},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{grep},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if ran != 0 {
+		t.Fatalf("Grep ran %d times, want 0 (length-truncated calls must NOT execute)", ran)
+	}
+	var toolMsg *ai.Message
+	for i := range conv {
+		if conv[i].Role == ai.RoleTool && conv[i].ToolCallID == "cap1" {
+			toolMsg = &conv[i]
+			break
+		}
+	}
+	if toolMsg == nil || toolMsg.Content == nil {
+		t.Fatalf("expected a tool result message for the truncated call")
+	}
+	if !strings.Contains(*toolMsg.Content, "truncat") {
+		t.Fatalf("tool result = %q, want a truncation-aware error message", *toolMsg.Content)
+	}
+}
+
+func TestRun_OutputCapOnlyBlocksLastToolCall(t *testing.T) {
+	// When a length-truncated turn carries several tool calls, only the
+	// LAST one was cut off — the earlier calls completed before the cap
+	// and must still run.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls: []ai.ToolCall{
+				{ID: "ok1", Name: "T", Arguments: `{"path":"a"}`},
+				{ID: "cut1", Name: "T", Arguments: `{}`},
+			},
+			FinishReason: "length",
+		},
+		{Content: ptr("done")},
+	}}
+	var seen []string
+	tool := &fnTool{
+		def: ai.ToolDefinition{Name: "T", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, args json.RawMessage) (string, error) {
+			seen = append(seen, string(args))
+			return "ok", nil
+		},
+	}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{tool},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(seen) != 1 || seen[0] != `{"path":"a"}` {
+		t.Fatalf("executed calls = %v, want only the complete first call", seen)
+	}
+}
+
+func TestRun_MissingRequiredArgsNotExecuted(t *testing.T) {
+	// A tool call missing an argument the schema declares required must
+	// not dispatch to the tool: running with zero-value defaults gives
+	// a misleading "successful" result (an empty Grep pattern matches
+	// every file) that weak models then imitate turn after turn. The
+	// model gets an explicit error result naming the missing argument.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{ID: "m1", Name: "Grep", Arguments: `{}`}}},
+		{Content: ptr("retrying with a pattern")},
+	}}
+	ran := 0
+	grep := &fnTool{
+		def: ai.ToolDefinition{
+			Name: "Grep",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			ran++
+			return "should not run", nil
+		},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{grep},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if ran != 0 {
+		t.Fatalf("Grep ran %d times, want 0 (missing required args must NOT execute)", ran)
+	}
+	var toolMsg *ai.Message
+	for i := range conv {
+		if conv[i].Role == ai.RoleTool && conv[i].ToolCallID == "m1" {
+			toolMsg = &conv[i]
+			break
+		}
+	}
+	if toolMsg == nil || toolMsg.Content == nil {
+		t.Fatalf("expected a tool result message for the rejected call")
+	}
+	if !strings.Contains(*toolMsg.Content, "pattern") || !strings.Contains(*toolMsg.Content, "required") {
+		t.Fatalf("tool result = %q, want an error naming the missing required argument", *toolMsg.Content)
+	}
+}
+
+func TestRun_CamelCaseSchemaToolCallExecutesWithRequiredCheck(t *testing.T) {
+	// The yolium_* protocol tools declare camelCase parameters (itemId,
+	// agentName). A model that calls them exactly as documented must
+	// pass the required-args check and reach the tool with its keys
+	// intact — the legacy snake_case normalisation used to rewrite them
+	// to item_id/agent_name, which the tool's unmarshal silently drops.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{
+			ID: "s1", Name: "yolium_start_agent",
+			Arguments: `{"itemId":"item-1","agentName":"code-agent"}`,
+		}}},
+		{Content: ptr("done")},
+	}}
+	var got string
+	start := &fnTool{
+		def: ai.ToolDefinition{
+			Name: "yolium_start_agent",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"itemId":    map[string]any{"type": "string"},
+					"agentName": map[string]any{"type": "string"},
+				},
+				"required": []string{"itemId", "agentName"},
+			},
+		},
+		run: func(_ context.Context, args json.RawMessage) (string, error) {
+			got = string(args)
+			return "Start-agent event emitted.", nil
+		},
+	}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{start},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got == "" {
+		t.Fatalf("tool never ran — camelCase args were rejected or mangled")
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(got), &args); err != nil {
+		t.Fatalf("unmarshal args: %v", err)
+	}
+	if args["itemId"] != "item-1" || args["agentName"] != "code-agent" {
+		t.Fatalf("tool received args %s, want camelCase keys intact", got)
+	}
+}
+
+func TestMissingRequiredArgs_JSONRoundTrippedRequiredList(t *testing.T) {
+	// Definitions that round-trip through JSON carry `required` as
+	// []any, not []string. Both shapes must be honoured.
+	def := ai.ToolDefinition{
+		Name: "T",
+		Parameters: map[string]any{
+			"type":     "object",
+			"required": []any{"path", "content"},
+		},
+	}
+	missing := missingRequiredArgs(def, json.RawMessage(`{"path":"a"}`))
+	if len(missing) != 1 || missing[0] != "content" {
+		t.Fatalf("missing = %v, want [content]", missing)
+	}
+	if got := missingRequiredArgs(def, json.RawMessage(`{"path":"a","content":"b"}`)); len(got) != 0 {
+		t.Fatalf("missing = %v, want none", got)
+	}
+}
+
 func TestRun_RetriesAbortedInlineToolCallOnce(t *testing.T) {
 	// Reproduction of the real failure against vLLM + Qwen3-Coder: the
 	// model emits its inline `<tool_call>` tag and then immediately

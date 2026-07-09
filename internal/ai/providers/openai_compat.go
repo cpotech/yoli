@@ -83,16 +83,19 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 	var content *string
 	var toolCalls []ai.ToolCall
 	var usage *ai.Usage
-	if len(wire.Choices) > 0 && wire.Choices[0].Message != nil {
-		m := wire.Choices[0].Message
-		content = m.Content
-		if len(m.ToolCalls) > 0 {
-			toolCalls = make([]ai.ToolCall, len(m.ToolCalls))
-			for i, c := range m.ToolCalls {
-				toolCalls[i] = ai.ToolCall{
-					ID:        c.ID,
-					Name:      c.Function.Name,
-					Arguments: c.Function.Arguments,
+	var finishReason string
+	if len(wire.Choices) > 0 {
+		finishReason = wire.Choices[0].FinishReason
+		if m := wire.Choices[0].Message; m != nil {
+			content = m.Content
+			if len(m.ToolCalls) > 0 {
+				toolCalls = make([]ai.ToolCall, len(m.ToolCalls))
+				for i, c := range m.ToolCalls {
+					toolCalls[i] = ai.ToolCall{
+						ID:        c.ID,
+						Name:      c.Function.Name,
+						Arguments: c.Function.Arguments,
+					}
 				}
 			}
 		}
@@ -109,7 +112,12 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 			Cost:             cost,
 		}
 	}
-	return ai.ChatResponse{Content: content, ToolCalls: toolCalls, Usage: usage}, nil
+	return ai.ChatResponse{
+		Content:      content,
+		ToolCalls:    toolCalls,
+		Usage:        usage,
+		FinishReason: finishReason,
+	}, nil
 }
 
 // ChatStream performs a streaming completion. The outer error covers
@@ -278,7 +286,8 @@ type wireResponseUsage struct {
 
 type wireResponse struct {
 	Choices []struct {
-		Message *wireResponseMessage `json:"message"`
+		Message      *wireResponseMessage `json:"message"`
+		FinishReason string               `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *wireResponseUsage `json:"usage,omitempty"`
 }

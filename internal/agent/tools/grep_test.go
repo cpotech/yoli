@@ -49,6 +49,21 @@ func gWriteFile(t *testing.T, root, rel, body string) {
 	}
 }
 
+func TestGrep_EmptyPatternRejected(t *testing.T) {
+	// An empty pattern compiles to a match-everything regex and returns
+	// the whole repo as a "successful" result — exactly the output a
+	// weak model imitates forever. It must be an error instead.
+	root := rootDir(t)
+	gWriteFile(t, root, "a.txt", "hello\n")
+	tool := NewGrepTool(root)
+	for _, args := range []string{`{}`, `{"pattern":""}`} {
+		_, err := tool.Run(context.Background(), []byte(args))
+		if err == nil || !strings.Contains(err.Error(), "pattern") {
+			t.Fatalf("Run(%s) err = %v, want error mentioning pattern", args, err)
+		}
+	}
+}
+
 func TestGrep_FilesWithMatchesDefault(t *testing.T) {
 	root := rootDir(t)
 	gWriteFile(t, root, "a.go", "package x\nfunc Foo() {}\n")

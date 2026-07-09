@@ -310,6 +310,44 @@ func TestChat_DecodesToolCallsToCamelCase(t *testing.T) {
 	}
 }
 
+func TestChat_SurfacesFinishReason(t *testing.T) {
+	// vLLM (and other OpenAI-compatible backends) report `"length"`
+	// when the output-token cap cut the generation. The agent loop
+	// needs the reason to distrust a tool call salvaged from the
+	// truncated tail, so Chat must not drop it.
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []any{
+							map[string]any{
+								"id":   "call_7",
+								"type": "function",
+								"function": map[string]any{
+									"name":      "Grep",
+									"arguments": `{}`,
+								},
+							},
+						},
+					},
+					"finish_reason": "length",
+				},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	res, err := p.Chat(context.Background(), userReq("search"))
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.FinishReason != "length" {
+		t.Fatalf("FinishReason = %q, want %q", res.FinishReason, "length")
+	}
+}
+
 func TestChat_SerialisesAssistantToolCallsAndToolRepliesSnakeCase(t *testing.T) {
 	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
 		jsonChoicesResponse(w, map[string]any{

@@ -116,6 +116,12 @@ func (t *GrepTool) Run(_ context.Context, raw json.RawMessage) (string, error) {
 	}
 
 	expr := args.Pattern
+	if expr == "" {
+		// An empty pattern compiles to a match-everything regex; the
+		// "successful" full-repo result misleads weak models into
+		// repeating the degenerate call. Required by the schema anyway.
+		return "", fmt.Errorf("grep: pattern is required and must be non-empty")
+	}
 	var prefix string
 	if args.I {
 		prefix += "(?i)"
