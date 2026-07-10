@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -92,7 +93,14 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 	// targets an input budget that keeps input + MaxTokens within the
 	// window — otherwise the provider rejects the request (e.g. vLLM's
 	// "input N + requested output M > window" HTTP 400).
-	inputBudget := computeInputBudget(contextBudget, maxTokens, estimateToolDefTokens(defs))
+	toolDefTokens := estimateToolDefTokens(defs)
+	inputBudget := computeInputBudget(contextBudget, maxTokens, toolDefTokens)
+
+	// estScale corrects the bytes/4 token estimate against reality: it is
+	// recalibrated each turn from the provider's reported prompt tokens,
+	// and tightened harder when a request is rejected for context
+	// overflow. The input budget is divided by it before compaction.
+	estScale := minEstimateScale
 
 	conv := make([]ai.Message, len(opts.Messages))
 	copy(conv, opts.Messages)
@@ -124,15 +132,41 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 
 		req := ai.ChatRequest{
 			Model:     opts.Model,
-			Messages:  compactConversation(scrubAbortedToolCallTags(conv), inputBudget),
+			Messages:  compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale)),
 			MaxTokens: maxTokens,
 		}
 		if len(defs) > 0 {
 			req.Tools = defs
 		}
 		resp, err := opts.Provider.Chat(ctx, req)
+		// A context-overflow rejection means the backend counted more
+		// prompt tokens than our estimate budgeted for. Tighten the scale,
+		// recompact, and retry — bounded so a window too small for even
+		// the protected message tail can't retry forever.
+		for retries := 0; err != nil && retries < 2; retries++ {
+			var overflow *ai.ContextOverflowError
+			if !errors.As(err, &overflow) {
+				break
+			}
+			estScale *= overflowScaleStep
+			if estScale > maxOverflowScale {
+				estScale = maxOverflowScale
+			}
+			req.Messages = compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale))
+			resp, err = opts.Provider.Chat(ctx, req)
+		}
 		if err != nil {
 			return conv, err
+		}
+
+		// Calibrate the estimate against the provider's actual count for
+		// the exact messages just sent (plus the tool definitions, which
+		// the server tokenizes as part of the prompt).
+		if resp.Usage != nil && resp.Usage.PromptTokens > 0 {
+			estScale = observedEstimateScale(
+				resp.Usage.PromptTokens,
+				estimateConversationTokens(req.Messages)+toolDefTokens,
+			)
 		}
 
 		// Models that emit tool calls as inline XML (e.g. Qwen3-Coder)
@@ -311,7 +345,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 	// extra round-trip: if it still doesn't terminate — or the provider
 	// errors — we fall through to the original cap error.
 	if opts.YoliumMode {
-		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, inputBudget, max); ok {
+		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, scaleBudget(inputBudget, estScale), max); ok {
 			return conv, nil
 		}
 	}

@@ -31,8 +31,53 @@ const (
 
 const messageOverheadTokens = 4
 
+const (
+	// minEstimateScale / maxObservedScale bound the estimate-correction
+	// scale learned from provider usage reports (see observedEstimateScale).
+	minEstimateScale = 1.0
+	maxObservedScale = 4.0
+	// maxOverflowScale bounds the harder shrink applied when the provider
+	// rejects a request outright for context overflow. Overflow is direct
+	// evidence the estimate is wrong, so it may push past the observed
+	// clamp.
+	maxOverflowScale = 8.0
+	// overflowScaleStep multiplies the estimate scale on each overflow
+	// retry.
+	overflowScaleStep = 1.5
+)
+
 func estimateTokens(s string) int {
 	return (len(s) + 3) / 4
+}
+
+// observedEstimateScale returns the provider-reported prompt-token count
+// divided by our own estimate for the same request, clamped to
+// [minEstimateScale, maxObservedScale]. The bytes/4 heuristic undercounts
+// dense content — hex-hash paths tokenize at ~2 bytes/token — and an
+// uncorrected 2x error walks the request straight past the server's
+// window. Ratios below 1 are clamped up: shrinking the input budget is
+// the only safe direction, and computeInputBudget's 90% margin already
+// covers mild over-estimation.
+func observedEstimateScale(actual, estimated int) float64 {
+	if actual <= 0 || estimated <= 0 {
+		return minEstimateScale
+	}
+	r := float64(actual) / float64(estimated)
+	if r < minEstimateScale {
+		return minEstimateScale
+	}
+	if r > maxObservedScale {
+		return maxObservedScale
+	}
+	return r
+}
+
+// scaleBudget shrinks an input token budget by the current estimate scale.
+func scaleBudget(budget int, scale float64) int {
+	if scale <= minEstimateScale {
+		return budget
+	}
+	return int(float64(budget) / scale)
 }
 
 // estimateToolDefTokens approximates the token cost of the tool

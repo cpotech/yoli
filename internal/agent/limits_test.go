@@ -174,3 +174,33 @@ func TestEstimateToolDefTokens_CountsDefinitionJSON(t *testing.T) {
 		t.Fatalf("two defs = %d, want %d", two, 2*one)
 	}
 }
+
+func TestObservedEstimateScale_ClampsToBounds(t *testing.T) {
+	cases := []struct {
+		actual, estimated int
+		want              float64
+	}{
+		{actual: 2000, estimated: 1000, want: 2.0},             // dense content undercounted
+		{actual: 800, estimated: 1000, want: minEstimateScale}, // over-estimate never grows budget
+		{actual: 9000, estimated: 1000, want: maxObservedScale},
+		{actual: 0, estimated: 1000, want: minEstimateScale}, // provider omitted usage
+		{actual: 1000, estimated: 0, want: minEstimateScale},
+	}
+	for _, c := range cases {
+		if got := observedEstimateScale(c.actual, c.estimated); got != c.want {
+			t.Fatalf("observedEstimateScale(%d, %d) = %v, want %v", c.actual, c.estimated, got, c.want)
+		}
+	}
+}
+
+func TestScaleBudget_DividesByScale(t *testing.T) {
+	if got := scaleBudget(9000, 1.0); got != 9000 {
+		t.Fatalf("unit scale changed budget: %d", got)
+	}
+	if got := scaleBudget(9000, 3.0); got != 3000 {
+		t.Fatalf("scaleBudget(9000, 3.0) = %d, want 3000", got)
+	}
+	if got := scaleBudget(9000, 0.5); got != 9000 {
+		t.Fatalf("sub-unit scale must not grow the budget: %d", got)
+	}
+}

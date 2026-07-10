@@ -240,6 +240,7 @@ func (p *OpenAICompatProvider) send(
 		}
 		if isContextOverflow(string(text)) {
 			msg += " (hint: set YOLI_CONTEXT_WINDOW to your server's context limit)"
+			return nil, &ai.ContextOverflowError{StatusCode: resp.StatusCode, Message: msg}
 		}
 		return nil, errors.New(msg)
 	}

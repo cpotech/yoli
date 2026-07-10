@@ -1007,3 +1007,149 @@ func TestRun_EmptyArgumentsTreatedAsEmptyObject(t *testing.T) {
 		t.Fatalf("noop called %d times", len(noop.calls))
 	}
 }
+
+// overflowProvider fails the first `failures` Chat calls with a typed
+// ContextOverflowError, then delegates to the scripted provider. It records
+// every request (including failed attempts) so tests can inspect what was
+// sent on each try.
+type overflowProvider struct {
+	failures int
+	failed   int
+	inner    *scriptedProvider
+	calls    []ai.ChatRequest
+}
+
+func (o *overflowProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
+	o.calls = append(o.calls, req)
+	if o.failed < o.failures {
+		o.failed++
+		return ai.ChatResponse{}, &ai.ContextOverflowError{
+			StatusCode: 400,
+			Message:    "provider: request failed: 400 Bad Request — maximum context length exceeded",
+		}
+	}
+	return o.inner.Chat(ctx, req)
+}
+
+// seedWithCompactableHistory builds a conversation whose early tool
+// messages sit outside compactConversation's protected tail, so a shrunken
+// budget visibly replaces them with truncation markers.
+func seedWithCompactableHistory() []ai.Message {
+	conv := []ai.Message{
+		{Role: ai.RoleSystem, Content: ptr("sys")},
+		userMsg("go"),
+	}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+		big := strings.Repeat("x", 4000)
+		conv = append(conv, ai.Message{Role: ai.RoleTool, ToolCallID: id, Content: &big})
+	}
+	return conv
+}
+
+func countTruncated(msgs []ai.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Content != nil && strings.HasPrefix(*m.Content, "[truncated:") {
+			n++
+		}
+	}
+	return n
+}
+
+// budgetWindowFor picks a total context window whose derived input budget
+// sits ~500 tokens above the given estimate, so the first request fits
+// without compaction and any budget shrink forces visible truncation.
+func budgetWindowFor(estimate, maxTokens int) int {
+	return (estimate+500)*10/9 + maxTokens
+}
+
+func TestRun_ContextOverflowRetriesWithTighterBudget(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	prov := &overflowProvider{
+		failures: 1,
+		inner:    &scriptedProvider{responses: []ai.ChatResponse{{Content: ptr("done")}}},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (overflow then retry)", len(prov.calls))
+	}
+	if n := countTruncated(prov.calls[0].Messages); n != 0 {
+		t.Fatalf("first attempt already truncated %d messages", n)
+	}
+	if n := countTruncated(prov.calls[1].Messages); n == 0 {
+		t.Fatalf("retry after overflow did not compact any message")
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "done" {
+		t.Fatalf("final = %v", last.Content)
+	}
+}
+
+func TestRun_ContextOverflowExhaustedSurfacesError(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	prov := &overflowProvider{failures: 3, inner: &scriptedProvider{}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	var overflow *ai.ContextOverflowError
+	if !errors.As(err, &overflow) {
+		t.Fatalf("err = %v, want ContextOverflowError after exhausted retries", err)
+	}
+	if len(prov.calls) != 3 {
+		t.Fatalf("calls = %d, want 3 (initial + 2 retries)", len(prov.calls))
+	}
+}
+
+func TestRun_CalibratesBudgetFromReportedUsage(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	noop := &fnTool{
+		def: ai.ToolDefinition{Name: "noop", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil },
+	}
+	// Turn 1 reports triple our estimate — the backend's tokenizer counts
+	// this content far denser than bytes/4. Turn 2 must then compact even
+	// though the raw estimate still fits the unscaled budget.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls: []ai.ToolCall{{ID: "t1", Name: "noop", Arguments: "{}"}},
+			Usage:     &ai.Usage{PromptTokens: est * 3},
+		},
+		{Content: ptr("done")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Tools:               []tools.Tool{noop},
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(prov.calls))
+	}
+	if n := countTruncated(prov.calls[0].Messages); n != 0 {
+		t.Fatalf("first request already truncated %d messages", n)
+	}
+	if n := countTruncated(prov.calls[1].Messages); n == 0 {
+		t.Fatalf("second request was not compacted despite 3x reported usage")
+	}
+}

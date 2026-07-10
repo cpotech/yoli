@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"iter"
 	"net/http"
@@ -434,6 +435,13 @@ func TestChat_ContextOverflowErrorIncludesHint(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
 		t.Fatalf("err = %v, want one mentioning YOLI_CONTEXT_WINDOW hint", err)
 	}
+	var overflow *ai.ContextOverflowError
+	if !errors.As(err, &overflow) {
+		t.Fatalf("err = %T, want *ai.ContextOverflowError", err)
+	}
+	if overflow.StatusCode != 400 {
+		t.Fatalf("StatusCode = %d, want 400", overflow.StatusCode)
+	}
 }
 
 func TestChat_ContextOverflowHintMatchesMaxModelLen(t *testing.T) {
@@ -461,6 +469,10 @@ func TestChat_UnrelatedErrorHasNoHint(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
 		t.Fatalf("unrelated error should not carry the hint: %v", err)
+	}
+	var overflow *ai.ContextOverflowError
+	if errors.As(err, &overflow) {
+		t.Fatalf("unrelated error should not be a ContextOverflowError: %v", err)
 	}
 }
 

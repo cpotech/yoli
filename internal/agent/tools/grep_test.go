@@ -49,6 +49,23 @@ func gWriteFile(t *testing.T, root, rel, body string) {
 	}
 }
 
+func TestGrep_SkipsDefaultSkipDirs(t *testing.T) {
+	root := rootDir(t)
+	gWriteFile(t, root, "a.go", "needle\n")
+	gWriteFile(t, root, "node_modules/pkg/y.go", "needle\n")
+	gWriteFile(t, root, ".pnpm-store/v10/index/h.go", "needle\n")
+	gWriteFile(t, root, ".pnpm/pkg/i.go", "needle\n")
+	tool := NewGrepTool(root)
+	got, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"pattern": "needle"}))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(got), "\n")
+	if len(lines) != 1 || lines[0] != "a.go" {
+		t.Fatalf("got %v", lines)
+	}
+}
+
 func TestGrep_EmptyPatternRejected(t *testing.T) {
 	// An empty pattern compiles to a match-everything regex and returns
 	// the whole repo as a "successful" result — exactly the output a
