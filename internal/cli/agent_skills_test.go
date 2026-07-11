@@ -249,6 +249,117 @@ func TestChatSystemPrompt_PlainWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestCycleSkill_Order(t *testing.T) {
+	list := []skills.LoadedSkill{{Name: "alpha"}, {Name: "beta"}}
+	cases := []struct {
+		current string
+		want    string
+	}{
+		{"", "alpha"},
+		{"alpha", "beta"},
+		{"beta", ""},
+		{"stale-name", ""},
+	}
+	for _, tc := range cases {
+		if got := cycleSkill(tc.current, list); got != tc.want {
+			t.Fatalf("cycleSkill(%q) = %q, want %q", tc.current, got, tc.want)
+		}
+	}
+	if got := cycleSkill("", nil); got != "" {
+		t.Fatalf("cycleSkill with no skills = %q, want empty", got)
+	}
+}
+
+func TestTUIPromptPrefix(t *testing.T) {
+	if got := tuiPromptPrefix(""); got != "> " {
+		t.Fatalf("empty prefix = %q", got)
+	}
+	if got := tuiPromptPrefix("plan"); got != "[plan] > " {
+		t.Fatalf("active prefix = %q", got)
+	}
+}
+
+func TestTUISystemWithSkill_AppendsBody(t *testing.T) {
+	c := &tuiLoopConfig{
+		skillList:   loadCLITestSkills(t, map[string]string{"foo": "unique foo methodology text"}),
+		activeSkill: "foo",
+	}
+	var warn bytes.Buffer
+	got := tuiSystemWithSkill("BASE", c, &warn)
+	if !strings.HasPrefix(got, "BASE") {
+		t.Fatalf("base prompt missing: %q", got)
+	}
+	if !strings.Contains(got, "## Active Skill: foo") ||
+		!strings.Contains(got, "unique foo methodology text") {
+		t.Fatalf("skill body missing: %q", got)
+	}
+	if warn.Len() != 0 {
+		t.Fatalf("unexpected warning: %q", warn.String())
+	}
+}
+
+func TestTUISystemWithSkill_FallsBackOnExpandError(t *testing.T) {
+	c := &tuiLoopConfig{activeSkill: "ghost"}
+	var warn bytes.Buffer
+	if got := tuiSystemWithSkill("BASE", c, &warn); got != "BASE" {
+		t.Fatalf("got %q, want bare base", got)
+	}
+	if !strings.Contains(warn.String(), "ghost") {
+		t.Fatalf("warning missing: %q", warn.String())
+	}
+}
+
+func TestTUI_SkillCommandActivatesSkillForNextTurn(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strp("ok")},
+	})}
+	c := newTUITestConfig(rec)
+	c.skillList = loadCLITestSkills(t, map[string]string{"foo": "unique foo methodology text"})
+	code, stdout, stderr := runTUITest(t, c, "/skill foo\nhello\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stdout, "skill set to foo") {
+		t.Fatalf("activation feedback missing: %q", stdout)
+	}
+	if len(rec.reqs) == 0 {
+		t.Fatal("provider never called")
+	}
+	system := *rec.reqs[0].Messages[0].Content
+	if !strings.Contains(system, "## Active Skill: foo") ||
+		!strings.Contains(system, "unique foo methodology text") {
+		t.Fatalf("active skill missing from system prompt: %q", system)
+	}
+}
+
+func TestTUI_SkillCommandShowsAndClears(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.skillList = loadCLITestSkills(t, map[string]string{"foo": "body"})
+	code, stdout, _ := runTUITest(t, c, "/skill\n/skill foo\n/skill off\n/skill\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	for _, want := range []string{"skill: none", "available: foo", "skill set to foo", "skill cleared"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("stdout missing %q: %q", want, stdout)
+		}
+	}
+}
+
+func TestTUI_SkillCommandUnknownWarns(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.skillList = loadCLITestSkills(t, map[string]string{"foo": "body"})
+	code, _, stderr := runTUITest(t, c, "/skill nope\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stderr, "unknown skill: nope") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
 func TestRunTUILoop_SystemPromptIncludesSkills(t *testing.T) {
 	rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
 		{Content: strp("ok")},

@@ -32,6 +32,7 @@ const (
 const tuiHelp = `commands:
   /help            show this list
   /model [slug]    show or switch the model
+  /skill [name|off] show, set, or clear the active skill (Shift-Tab cycles)
   /context         show estimated context size
   /clear           start a new session
   /exit, /quit     leave the REPL (or Ctrl-D)`
@@ -63,6 +64,55 @@ type tuiLoopConfig struct {
 	// skillList is advertised in the system prompt; loaded once at
 	// startup by the caller so the loop stays env-free.
 	skillList []skills.LoadedSkill
+	// activeSkill is the skill whose body is appended to the system
+	// prompt each turn ("" = none). Cycled with Shift-Tab or /skill.
+	activeSkill string
+}
+
+// cycleSkill advances the active skill through none → first → … → last
+// → none, returning the new active skill name ("" = none).
+func cycleSkill(current string, skillList []skills.LoadedSkill) string {
+	if len(skillList) == 0 {
+		return ""
+	}
+	if current == "" {
+		return skillList[0].Name
+	}
+	for i := range skillList {
+		if skillList[i].Name == current {
+			if i+1 < len(skillList) {
+				return skillList[i+1].Name
+			}
+			return ""
+		}
+	}
+	// Unknown current (e.g. stale name): reset to none.
+	return ""
+}
+
+// tuiPromptPrefix renders the REPL prompt, showing the active skill so
+// the Shift-Tab state is always visible.
+func tuiPromptPrefix(activeSkill string) string {
+	if activeSkill == "" {
+		return "> "
+	}
+	return "[" + activeSkill + "] > "
+}
+
+// tuiSystemWithSkill appends the active skill's expanded body to the
+// base system prompt. Expansion failures warn and fall back to base so
+// a broken skill never blocks the turn.
+func tuiSystemWithSkill(base string, c *tuiLoopConfig, warn io.Writer) string {
+	if c.activeSkill == "" {
+		return base
+	}
+	body, err := skills.Expand(c.activeSkill, c.skillList)
+	if err != nil {
+		fmt.Fprintf(warn, "skill %s: %v\n", c.activeSkill, err)
+		return base
+	}
+	return base + "\n\n## Active Skill: " + c.activeSkill +
+		"\n\nThe user activated this skill for the current task. Adopt these instructions:\n\n" + body
 }
 
 // tuiIsTerminal reports whether f is a character device (a terminal).
@@ -134,6 +184,7 @@ func (s *tuiSpinner) Stop() {
 // tuiLineEditor provides a line editing interface with:
 //   - Up/Down arrows to navigate prompt history
 //   - Left/Right arrows to move cursor within the current prompt
+//   - Shift-Tab to cycle the active skill (via onShiftTab)
 //   - Backspace/Delete to edit
 //   - Enter to submit
 //
@@ -146,6 +197,10 @@ type tuiLineEditor struct {
 	prompt  string        // current input buffer (may contain '\n' from paste)
 	cursor  int           // cursor position within prompt (0 = beginning)
 	curRow  int           // visual row of the cursor within the rendered buffer
+	prefix  string        // prompt prefix rendered before the first row
+	// onShiftTab, when non-nil, fires on Shift-Tab (CSI Z) and returns
+	// the new prompt prefix; the in-progress input is preserved.
+	onShiftTab func() string
 }
 
 // newTUILineEditor creates a line editor if stdin is a terminal.
@@ -163,6 +218,7 @@ func newTUILineEditor(stdin *os.File, stdout io.Writer) *tuiLineEditor {
 		histIdx: -1,
 		prompt:  "",
 		cursor:  0,
+		prefix:  "> ",
 	}
 }
 
@@ -272,6 +328,11 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 			case 'D': // Left arrow
 				if e.cursor > 0 {
 					e.cursor--
+					e.redrawLine()
+				}
+			case 'Z': // Shift-Tab
+				if e.onShiftTab != nil {
+					e.prefix = e.onShiftTab()
 					e.redrawLine()
 				}
 			default:
@@ -409,12 +470,13 @@ func (e *tuiLineEditor) redrawLine() {
 	}
 	e.stdout.WriteString("\r\x1b[J")
 
-	// Print the buffer, prefixing the first row with "> " and breaking
-	// rows with CRLF (raw mode needs the explicit carriage return).
+	// Print the buffer, prefixing the first row with the prompt prefix
+	// and breaking rows with CRLF (raw mode needs the explicit carriage
+	// return).
 	lines := strings.Split(e.prompt, "\n")
 	for i, ln := range lines {
 		if i == 0 {
-			e.stdout.WriteString("> " + ln)
+			e.stdout.WriteString(e.prefix + ln)
 		} else {
 			e.stdout.WriteString("\r\n" + ln)
 		}
@@ -425,7 +487,7 @@ func (e *tuiLineEditor) redrawLine() {
 	targetRow := strings.Count(before, "\n")
 	col := len(before) - (strings.LastIndexByte(before, '\n') + 1)
 	if targetRow == 0 {
-		col += 2 // account for the "> " prefix
+		col += len(e.prefix)
 	}
 
 	// The cursor currently sits at the end of the last row; move it to the
@@ -519,7 +581,7 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 // runTUILoop is the REPL proper: read a line, handle slash commands, or
 // run one agent turn. Provider-agnostic and fully testable.
 func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
-	system := chatSystemPrompt(c.skillList)
+	baseSystem := chatSystemPrompt(c.skillList)
 	if c.interactive {
 		fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
 	}
@@ -528,6 +590,12 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 	var editor *tuiLineEditor
 	if c.interactive && tuiIsTerminal(os.Stdin) {
 		editor = newTUILineEditor(os.Stdin, stderr)
+	}
+	if editor != nil {
+		editor.onShiftTab = func() string {
+			c.activeSkill = cycleSkill(c.activeSkill, c.skillList)
+			return tuiPromptPrefix(c.activeSkill)
+		}
 	}
 
 	// Create bufio reader for non-interactive mode (scripted input)
@@ -575,13 +643,16 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 
 	for {
 		if c.interactive {
-			fmt.Fprint(stderr, "> ")
+			fmt.Fprint(stderr, tuiPromptPrefix(c.activeSkill))
 		}
 
 		var line string
 		var atEOF bool
 
 		if editor != nil {
+			// Keep the editor's redraw prefix in sync with the /skill
+			// command, which can change the active skill between reads.
+			editor.prefix = tuiPromptPrefix(c.activeSkill)
 			// Use the line editor with history and cursor support
 			result, eof, err := editor.readLine()
 			if err != nil && err != io.EOF {
@@ -608,7 +679,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 		}
 
 		if strings.HasPrefix(line, "/") {
-			if quit := tuiSlashCommand(&c, line, system, stdout, stderr); quit {
+			if quit := tuiSlashCommand(&c, line, baseSystem, stdout, stderr); quit {
 				return 0
 			}
 			if atEOF {
@@ -622,6 +693,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			continue
 		}
+		system := tuiSystemWithSkill(baseSystem, &c, stderr)
 		seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 		seed = append(seed, c.sess.BuildMessages()...)
 
@@ -672,8 +744,9 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 }
 
 // tuiSlashCommand handles a "/..." line. It returns true when the REPL
-// should exit. It may swap c.sess (/clear) or c.model (/model).
-func tuiSlashCommand(c *tuiLoopConfig, line, system string, stdout, stderr io.Writer) bool {
+// should exit. It may swap c.sess (/clear), c.model (/model), or
+// c.activeSkill (/skill).
+func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr io.Writer) bool {
 	fields := strings.Fields(line)
 	cmd, args := fields[0], fields[1:]
 	switch cmd {
@@ -696,7 +769,37 @@ func tuiSlashCommand(c *tuiLoopConfig, line, system string, stdout, stderr io.Wr
 		}
 		c.model = args[0]
 		fmt.Fprintf(stdout, "model set to %s\n", c.model)
+	case "/skill":
+		if len(args) == 0 {
+			active := c.activeSkill
+			if active == "" {
+				active = "none"
+			}
+			fmt.Fprintf(stdout, "skill: %s\n", active)
+			if len(c.skillList) > 0 {
+				names := make([]string, len(c.skillList))
+				for i, s := range c.skillList {
+					names[i] = s.Name
+				}
+				fmt.Fprintf(stdout, "available: %s\n", strings.Join(names, ", "))
+			}
+			return false
+		}
+		if args[0] == "off" || args[0] == "none" {
+			c.activeSkill = ""
+			fmt.Fprintln(stdout, "skill cleared")
+			return false
+		}
+		for _, s := range c.skillList {
+			if s.Name == args[0] {
+				c.activeSkill = s.Name
+				fmt.Fprintf(stdout, "skill set to %s\n", s.Name)
+				return false
+			}
+		}
+		fmt.Fprintf(stderr, "unknown skill: %s\n", args[0])
 	case "/context":
+		system := tuiSystemWithSkill(baseSystem, c, stderr)
 		seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 		seed = append(seed, c.sess.BuildMessages()...)
 		window := c.contextWindow
