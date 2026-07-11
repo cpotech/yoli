@@ -92,6 +92,18 @@ func loadSkillsFromEnv() ([]skills.LoadedSkill, error) {
 	})
 }
 
+// loadSkillsForPrompt loads skills for system-prompt injection. Load
+// failures degrade to an empty list with a stderr warning — a broken
+// skills directory must never break the agent.
+func loadSkillsForPrompt(warn io.Writer) []skills.LoadedSkill {
+	list, err := loadSkillsFromEnv()
+	if err != nil {
+		fmt.Fprintf(warn, "yoli: skills: %v (continuing without skills)\n", err)
+		return nil
+	}
+	return list
+}
+
 func runSkillsList(stdout, stderr io.Writer) int {
 	list, err := loadSkillsFromEnv()
 	if err != nil {

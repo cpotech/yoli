@@ -22,3 +22,10 @@ type LoadedSkill struct {
 	BodyPath    string
 	Origin      Origin
 }
+
+// Trigger returns the frontmatter `trigger` string, or "" when absent
+// or not a string.
+func (s LoadedSkill) Trigger() string {
+	t, _ := s.Frontmatter["trigger"].(string)
+	return t
+}

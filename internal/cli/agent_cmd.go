@@ -14,6 +14,7 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/agent/yolium"
 	"yoli/internal/ai"
@@ -298,6 +299,9 @@ type agentLoopConfig struct {
 	whitelist  []string
 	repoPath   string
 	yoliumMode bool
+	// skillList is advertised in the system prompt and served by the
+	// Skill tool. Empty means no section and no tool.
+	skillList []skills.LoadedSkill
 	// eventSink receives structured events when yoliumMode is on. Nil
 	// is treated as yolium.NopSink. Standalone runs always use NopSink.
 	eventSink       yolium.EventSink
@@ -387,6 +391,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		whitelist:       whitelist,
 		repoPath:        resolveRepoPath(),
 		yoliumMode:      flags.YoliumMode,
+		skillList:       loadSkillsForPrompt(stderr),
 		eventSink:       sink,
 		sessionTarget:   firstNonEmpty(flags.Session, os.Getenv("AGENT_SESSION")),
 		sessionFork:     firstNonEmpty(flags.Fork, os.Getenv("AGENT_FORK")),
@@ -434,6 +439,13 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	})
 
 	allTools := append(filteredTools, subAgent)
+
+	// The Skill tool is registered after whitelist filtering (like the
+	// Agent tool) so AGENT_TOOLS cannot strand skills that the system
+	// prompt advertises.
+	if len(c.skillList) > 0 {
+		allTools = append(allTools, tools.NewSkillTool(c.skillList))
+	}
 
 	// Under --yolium-mode, register the yolium_* protocol tools. The
 	// terminator tools (yolium_complete, yolium_error, yolium_ask_question)
@@ -499,6 +511,10 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			"There is no `complete` tool; the line itself is the signal. If you " +
 			"cannot finish the task, emit `error` with a one-sentence reason " +
 			"rather than going silent."
+	}
+
+	if sec := skills.InjectSection(c.skillList); sec != "" {
+		system += "\n\n" + sec
 	}
 
 	messages := []ai.Message{

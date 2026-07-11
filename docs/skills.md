@@ -17,6 +17,18 @@ Skills live in three locations, searched in order of precedence:
 A project skill overrides a user skill of the same name, which overrides a
 built-in.
 
+The built-in directory resolves relative to the *installed* binary:
+`dist/yoli-linux-amd64` sees the repo's `skills/`, a container binary at
+`/usr/local/bin/yoli` sees `/usr/local/skills` (the Dockerfile copies the
+repo's `skills/` there), and a dev binary at the repo root looks *outside*
+the repo — use the dist binary when testing built-ins.
+
+## Built-in skills
+
+- **plan** (`skills/plan/SKILL.md`) — analyze the codebase and produce a
+  structured implementation plan (ordered steps, files to modify,
+  acceptance criteria, test specifications) without writing code.
+
 ## SKILL.md format
 
 ```markdown
@@ -31,10 +43,11 @@ You are reviewing a pull request. Follow the checklist below…
 
 - `name` — unique slug, must match the directory name.
 - `description` — one-line summary shown by `yoli skills list`.
-- `trigger` — when the agent should invoke this skill on its own.
+- `trigger` — when the agent should invoke this skill on its own; shown
+  alongside the description in the injected system-prompt section.
 
-The body below the frontmatter is the prompt content that gets injected
-into the agent's system message when the skill is activated.
+The body below the frontmatter is the prompt content the agent adopts
+when it activates the skill via the `Skill` tool.
 
 ## CLI
 
@@ -48,7 +61,15 @@ yoli skills show <name>
 
 ## Where skill resolution happens
 
-The agent loads skills via `internal/agent/skills`' `Load` and injects the
-matching skill body into the system message before the loop starts. The
-loader is the only piece of code that touches the file system; the
-provider sees only the assembled prompt.
+`yoli agent`, `yoli chat`, and `yoli tui` load skills once at startup via
+`internal/agent/skills`' `Load` and append an "Available Skills" section
+(names, descriptions, and triggers only) to the system prompt. Skill
+bodies are not inlined; the agent fetches one on demand by calling the
+`Skill` tool with the skill's name, which returns the frontmatter-stripped
+Markdown body. When no skills are found, neither the section nor the tool
+is registered. A failing skills directory degrades to "no skills" with a
+stderr warning rather than breaking the run.
+
+Note that project skills (`.yoli/skills/`) feed the system prompt of any
+agent run in that repository — the same trust model as checked-in agent
+context files like `AGENTS.md`.

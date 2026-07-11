@@ -15,6 +15,7 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/ai"
 )
@@ -59,6 +60,9 @@ type tuiLoopConfig struct {
 	// Run call and /context agree. Zero falls back to the agent defaults.
 	contextWindow int
 	maxTokens     int
+	// skillList is advertised in the system prompt; loaded once at
+	// startup by the caller so the loop stays env-free.
+	skillList []skills.LoadedSkill
 }
 
 // tuiIsTerminal reports whether f is a character device (a terminal).
@@ -481,6 +485,10 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 			DefaultModel: model,
 		}),
 	)
+	skillList := loadSkillsForPrompt(stderr)
+	if len(skillList) > 0 {
+		toolset = append(toolset, tools.NewSkillTool(skillList))
+	}
 	sess, err := resolveChatSession(flags, cwd, in)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -494,6 +502,7 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		sess:          sess,
 		contextWindow: contextWindow,
 		maxTokens:     maxTokens,
+		skillList:     skillList,
 		newSession: func() (*agentsession.Session, error) {
 			opts := agentsession.Options{RootDir: flags.SessionRoot, Cwd: cwd}
 			if flags.NoSession {
@@ -510,7 +519,7 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 // runTUILoop is the REPL proper: read a line, handle slash commands, or
 // run one agent turn. Provider-agnostic and fully testable.
 func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
-	system := chatSystem
+	system := chatSystemPrompt(c.skillList)
 	if c.interactive {
 		fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
 	}

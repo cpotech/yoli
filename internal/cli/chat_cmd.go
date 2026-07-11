@@ -11,6 +11,7 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/ai"
 )
@@ -44,6 +45,16 @@ const chatSystem = "You are Yoli, a small coding agent. " +
 	"Use the provided tools to inspect and modify the user's working directory. " +
 	"Use Agent to delegate a focused sub-task to another role (e.g. planner, reviewer) in an isolated subprocess. " +
 	"Keep responses concise."
+
+// chatSystemPrompt returns chatSystem with the Available Skills section
+// appended when any skills are loaded. Shared by chat and tui.
+func chatSystemPrompt(skillList []skills.LoadedSkill) string {
+	sec := skills.InjectSection(skillList)
+	if sec == "" {
+		return chatSystem
+	}
+	return chatSystem + "\n\n" + sec
+}
 
 type chatFlags struct {
 	LogLevel    string
@@ -234,7 +245,11 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 			DefaultModel: model,
 		}),
 	)
-	system := chatSystem
+	skillList := loadSkillsForPrompt(stderr)
+	if len(skillList) > 0 {
+		toolset = append(toolset, tools.NewSkillTool(skillList))
+	}
+	system := chatSystemPrompt(skillList)
 	user := prompt
 	sess, err := resolveChatSession(flags, cwd, os.Stdin)
 	if err != nil {
