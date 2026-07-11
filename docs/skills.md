@@ -50,6 +50,29 @@ You are reviewing a pull request. Follow the checklist below…
 The body below the frontmatter is the prompt content the agent adopts
 when it activates the skill via the `Skill` tool.
 
+## Using skills
+
+Skills reach the model through two paths:
+
+**Model-driven (agent, chat, tui).** The system prompt lists every
+available skill (name, description, trigger); when a task matches a
+trigger, the model calls the `Skill` tool to fetch the body and adopts it
+as its methodology. This needs no action from you beyond phrasing the
+request — "plan how to add X" matches the `plan` skill's trigger.
+
+**User-driven (tui).** You can pin a skill yourself instead of relying on
+the model to pick it:
+
+- **Shift-Tab** cycles the active skill: none → each skill → none. The
+  prompt prefix shows the selection (`[plan] > `), and in-progress input
+  is preserved.
+- **`/skill [name|off]`** shows, sets, or clears the active skill — the
+  same control when a terminal isn't available (e.g. scripted stdin).
+
+While a skill is active, its full body is appended to the system prompt
+on every turn (so the model doesn't need to call the `Skill` tool), and
+`/context` includes the added size. See [yoli-tui.md](yoli-tui.md).
+
 ## CLI
 
 ```bash

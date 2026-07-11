@@ -95,9 +95,10 @@ internal/
     context/              # AGENTS.md loader
     session/              # JSONL session store (branching, fork/resume)
     skills/               # loader, injector, expander
-    tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent
+    tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent, Skill
     yolium/               # NDJSON protocol + bridge tools
   cli/                    # command surface (chat, tui, run, agent, session, skills, config)
+skills/                   # built-in skills (plan, …), embedded into the binary via go:embed
 ```
 
 `internal/` keeps every package unimportable from outside the module.
@@ -119,7 +120,7 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `yoli run --role <role>` | Run the stdio agent with the given role (`coder`, `planner`, `reviewer`). |
 | `yoli agent [flags]` | Run the headless agent loop and emit Yolium NDJSON progress/complete events on stdout. |
 | `yoli session list \| current \| tree \| branch` | Inspect and operate on session files. |
-| `yoli skills list` / `show <name>` | Inspect skills available to the agent. |
+| `yoli skills list` / `show <name>` | Inspect skills available to the agent (see [Skills](#skills)). |
 | `yoli config path` | Print the resolved user config file path. |
 | `yoli config get <key>` | Print the effective value of a known config key. |
 | `yoli config set <key> <value>` | Persist a value into the user config file. |
@@ -153,6 +154,20 @@ Resume the latest with `-c`, pick one interactively with `-r`, target a specific
 one with `--session <path|id>`, or fork with `--fork <path|id>`. See
 [docs/session-format.md](docs/session-format.md) for the on-disk format and
 [`yoli session`](#commands) for inspection.
+
+## Skills
+
+A skill is a `SKILL.md` with YAML frontmatter that packages a focused
+methodology the agent adopts on demand. `yoli agent`, `chat`, and `tui`
+advertise available skills in the system prompt; the model fetches a
+skill's body with the `Skill` tool when the task matches its trigger. In
+the TUI you can also pin one yourself — **Shift-Tab** cycles the active
+skill (shown in the prompt as `[plan] > `), or use `/skill <name|off>`.
+
+Skills load from `./.yoli/skills/` (project), `~/.yoli/skills/` (user),
+and the built-ins embedded in the binary — currently `plan`, which
+produces a structured implementation plan without writing code. Project
+overrides user overrides built-in. See [docs/skills.md](docs/skills.md).
 
 ## Providers
 

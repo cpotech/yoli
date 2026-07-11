@@ -1,7 +1,10 @@
 # Architecture
 
 Yoli is a single Go module rooted at the repository root. All code lives
-under `internal/` so it stays unimportable from outside the module.
+under `internal/` so it stays unimportable from outside the module, with
+one exception: the tiny `yoli/skills` package at `skills/`, which embeds
+the built-in skill bundle (`skills/*/SKILL.md`) into the binary via
+`go:embed`.
 
 ## `internal/ai`
 
@@ -23,8 +26,13 @@ The agent loop and its tools. Contains:
   `Grep`, `Bash`) that operate inside the working directory, plus
   `path-safety` checks shared between them, and the `WebSearch` tool.
 - The AGENTS.md auto-loader (`internal/agent/context`) and the skills
-  loader/injector/expander (`internal/agent/skills`) that inject per-skill
-  prompts into the system message.
+  subsystem (`internal/agent/skills`): the loader scans project
+  (`.yoli/skills/`) and user (`~/.yoli/skills/`) directories plus the
+  embedded built-in bundle, the injector renders the "Available Skills"
+  system-prompt section, and the expander serves frontmatter-stripped
+  bodies — on demand via the `Skill` tool, or pinned per-turn by the
+  TUI's active-skill toggle (Shift-Tab / `/skill`). See
+  [skills.md](skills.md).
 - The Yolium stdio protocol layer (`internal/agent/yolium`, `@@YOLIUM:`
   framed JSON messages) and the stdio runner (`agent.RunStdio`) that hosts
   an agent over stdin/stdout.
