@@ -17,6 +17,7 @@ import (
 // an env-var counterpart use the env-var name directly so config-file
 // and environment names are identical.
 var ConfigKeys = []string{
+	"YOLI_PROVIDER",
 	"default_provider",
 	"YOLI_MODEL",
 	"default_role",
@@ -142,6 +143,9 @@ func ReadConfigFile(path string) (Config, error) {
 			out[k] = val
 		case nil:
 			// skip explicit nulls
+		case map[string]any, []any:
+			// Structured values (e.g. the "providers" object) are not
+			// part of the flat config; ReadProviderProfiles parses them.
 		default:
 			out[k] = fmt.Sprint(val)
 		}
@@ -315,23 +319,26 @@ func ApplyEnvDefaults(cfg Config) {
 
 // SetConfigValue persists key=value to the user-level config file,
 // creating intermediate directories as needed. Returns an error for
-// unknown keys and never creates the file in that case.
+// unknown keys and never creates the file in that case. Other keys —
+// including the structured "providers" object — are preserved verbatim.
 func SetConfigValue(key, value string, opts PathOptions) error {
 	if !IsConfigKey(key) {
 		return fmt.Errorf("Unknown config key: %s", key)
 	}
 	path := ConfigPath(opts)
-	existing := Config{}
-	if _, err := os.Stat(path); err == nil {
-		loaded, err := ReadConfigFile(path)
-		if err != nil {
-			return err
+	existing := map[string]json.RawMessage{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return &ConfigParseError{Path: path, Err: err}
 		}
-		existing = loaded
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	existing[key] = value
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	existing[key] = encoded
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

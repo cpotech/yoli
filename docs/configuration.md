@@ -16,7 +16,8 @@ through `yoli config list`.
 
 | Key | Env var | Purpose |
 |---|---|---|
-| `default_provider` | — | Reserved: one of `openrouter`, `faux`. Not yet read by `chat`/`run`. |
+| `YOLI_PROVIDER` | `YOLI_PROVIDER` | Name of the provider profile to activate (see [Provider profiles](#provider-profiles)). As an env var it is an explicit selection: an unknown name is an error. |
+| `default_provider` | — | Name of the provider profile used when no `--provider` flag or `YOLI_PROVIDER` env var is given. An unknown name warns and falls back to the flat keys below. |
 | `default_model` | `YOLI_MODEL` | Model identifier sent to the backend verbatim. Exported into the env by `ApplyEnvDefaults`. |
 | `default_role` | — | Reserved: default role prompt for `yoli run`. Not yet read by `run`. |
 | `base_url` | `YOLI_BASE_URL` | Any OpenAI-compatible endpoint (required). See [self-hosting.md](self-hosting.md). Exported into the env by `ApplyEnvDefaults`. |
@@ -26,7 +27,52 @@ through `yoli config list`.
 | `YOLI_CONTEXT_WINDOW` | `YOLI_CONTEXT_WINDOW` | Total context window in tokens (input + output) the backend accepts. Set this to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom before compacting input, keeping requests within the window. Defaults to 180000. Invalid or non-positive values warn on stderr and fall back to the default. |
 | `YOLI_MAX_TOKENS` | `YOLI_MAX_TOKENS` | Per-turn output-token cap (default 8192). Lower it to leave more of the window for input. Invalid or non-positive values warn on stderr and fall back to the default. |
 
-Unknown keys in a config file are ignored with a warning on stderr.
+Unknown keys in a config file are ignored with a warning on stderr. The
+`providers` key is special: it holds structured profile objects rather
+than a flat string value (next section).
+
+## Provider profiles
+
+The `providers` object maps profile names to OpenAI-compatible endpoint
+definitions, so several backends can be configured at once and selected
+per invocation:
+
+```json
+{
+  "default_provider": "runpod",
+  "providers": {
+    "runpod": {
+      "base_url": "https://mypod.proxy.runpod.net/v1",
+      "api_key": "…",
+      "model": "InternScience/Agents-A1",
+      "context_window": 57344,
+      "max_tokens": 8192
+    },
+    "openrouter": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key": "sk-or-v1-…",
+      "model": "openai/gpt-4o"
+    }
+  }
+}
+```
+
+Profile fields: `base_url`, `api_key`, `model`, `context_window`,
+`max_tokens`. The last three are optional and fall back to the flat
+keys / environment; note that `context_window` and `max_tokens` are JSON
+numbers here, not strings. Profiles work in both the user config and the
+project `.yolirc.json`; a project profile replaces a same-named user
+profile wholesale.
+
+A profile is selected with precedence `--provider` flag >
+`YOLI_PROVIDER` env var > `YOLI_PROVIDER`/`default_provider` config key.
+When a profile is active, its fields outrank the flat keys but the shell
+environment still wins overall. With no selection the flat `YOLI_*` keys
+behave exactly as before, so existing configs keep working.
+
+Profiles are edited by hand in the JSON file; `yoli config providers`
+lists them (API keys are never printed), and the TUI's `/provider`
+command switches between them at runtime.
 
 > **Migration note:** the `openrouter_api_key` key and the
 > `OPENROUTER_API_KEY` / `OPENROUTER_MODEL` env vars were retired in favor
@@ -47,6 +93,9 @@ yoli config set default_provider openrouter
 
 # Show every key with its value and source
 yoli config list
+
+# List provider profiles (never prints api keys)
+yoli config providers
 ```
 
 `yoli config list` annotates each row with one of `env`, `project`, `user`,

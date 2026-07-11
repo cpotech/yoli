@@ -16,7 +16,7 @@ import (
 	"yoli/internal/ai"
 )
 
-const chatUsage = "Usage: yoli chat [--loglevel debug|info|error|none] <prompt>\n"
+const chatUsage = "Usage: yoli chat [--provider <name>] [--loglevel debug|info|error|none] <prompt>\n"
 
 // Log level ranks: higher = more verbose. A message tagged at rank R
 // is shown when the active level's rank is >= R.
@@ -58,6 +58,7 @@ func chatSystemPrompt(skillList []skills.LoadedSkill) string {
 
 type chatFlags struct {
 	LogLevel    string
+	Provider    string
 	Continue    bool
 	Resume      bool
 	NoSession   bool
@@ -82,6 +83,14 @@ func parseChatFlags(args []string) (chatFlags, []string, error) {
 			i++
 		case strings.HasPrefix(arg, "--loglevel="):
 			f.LogLevel = strings.TrimPrefix(arg, "--loglevel=")
+		case arg == "--provider":
+			if i+1 >= len(args) {
+				return f, nil, fmt.Errorf("--provider requires a value")
+			}
+			f.Provider = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--provider="):
+			f.Provider = strings.TrimPrefix(arg, "--provider=")
 		case arg == "-c":
 			f.Continue = true
 		case arg == "-r":
@@ -222,6 +231,19 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	ApplyEnvDefaults(cfg)
 	if !requireAPIKey(stderr) {
 		return 1
@@ -229,7 +251,11 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	model := os.Getenv("YOLI_MODEL")
 	rank := logRank(flags.LogLevel)
 	if rank >= logRankInfo {
-		fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+		if profileName != "" {
+			fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
+		} else {
+			fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+		}
 	}
 	provider, err := newProviderFromEnv("Yoli")
 	if err != nil {

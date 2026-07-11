@@ -48,6 +48,25 @@ func TestReadConfigFile_ParsesObject(t *testing.T) {
 	}
 }
 
+func TestReadConfigFile_SkipsStructuredValues(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "cfg.json")
+	writeFile(t, p, `{"YOLI_MODEL":"m","providers":{"x":{"base_url":"u"}},"list":[1,2]}`)
+	got, err := ReadConfigFile(p)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got["YOLI_MODEL"] != "m" {
+		t.Fatalf("got %+v", got)
+	}
+	if _, ok := got["providers"]; ok {
+		t.Fatalf("providers object leaked into flat config: %+v", got)
+	}
+	if _, ok := got["list"]; ok {
+		t.Fatalf("array leaked into flat config: %+v", got)
+	}
+}
+
 func TestReadConfigFile_MalformedReturnsParseError(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "broken.json")
@@ -204,7 +223,7 @@ func TestLoadConfig_HintsRenamedOpenRouterAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-		if _, ok := cfg["openrouter_api_key"]; ok {
+	if _, ok := cfg["openrouter_api_key"]; ok {
 		t.Fatalf("retired key should be dropped: %+v", cfg)
 	}
 	if cfg["YOLI_API_KEY"] != "stale-key" {
@@ -260,6 +279,7 @@ func TestIsConfigKey(t *testing.T) {
 
 func TestConfigKeys_OnlyContainsExpectedKeys(t *testing.T) {
 	want := []string{
+		"YOLI_PROVIDER",
 		"default_provider",
 		"YOLI_MODEL",
 		"default_role",

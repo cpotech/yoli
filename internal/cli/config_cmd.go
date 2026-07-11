@@ -11,6 +11,7 @@ Subcommands:
   get <key>                  Print the effective value for <key>
   set <key> <value>          Persist <key>=<value> to the user config file
   list                       Print every known key with its value and source
+  providers                  List provider profiles from the "providers" object
 `
 
 // runConfig dispatches the `yoli config <subcommand>` family. Returns
@@ -31,6 +32,8 @@ func runConfig(args []string, stdout, stderr io.Writer) int {
 		return runConfigSet(rest, stdout, stderr)
 	case "list":
 		return runConfigList(stdout, stderr)
+	case "providers":
+		return runConfigProviders(rest, stdout, stderr)
 	default:
 		fmt.Fprint(stderr, configUsage)
 		return 1
@@ -75,6 +78,51 @@ func runConfigSet(args []string, stdout, stderr io.Writer) int {
 	if err := SetConfigValue(key, value, PathOptionsFromEnv()); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
+	}
+	return 0
+}
+
+// runConfigProviders lists the named provider profiles. API keys are
+// deliberately never printed. Profiles are edited by hand in the JSON
+// config file; there is no set/remove subcommand.
+func runConfigProviders(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && args[0] != "list" {
+		fmt.Fprint(stderr, "Usage: yoli config providers [list]\n")
+		fmt.Fprint(stderr, "Profiles are defined under the \"providers\" key of the config file.\n")
+		return 1
+	}
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if len(profiles) == 0 {
+		fmt.Fprintln(stdout, "(no provider profiles defined)")
+		return 0
+	}
+	cfg, err := LoadConfig(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	active, _ := resolveProviderName(cfg, "")
+	for _, name := range profileNames(profiles) {
+		p := profiles[name]
+		model := p.Model
+		if model == "" {
+			model = "(inherited)"
+		}
+		marker := ""
+		if name == active {
+			marker = " *"
+		}
+		fmt.Fprintf(stdout, "%s: base_url=%s model=%s%s\n", name, p.BaseURL, model, marker)
 	}
 	return 0
 }

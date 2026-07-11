@@ -20,12 +20,14 @@ import (
 	"yoli/internal/ai"
 )
 
-const agentUsage = `Usage: yoli agent [--model <slug>] [--tools <comma-separated>] [--prompt-file <file>] [--prompt <text>] [--yolium-mode] [--events-fd <N>]
+const agentUsage = `Usage: yoli agent [--model <slug>] [--provider <name>] [--tools <comma-separated>] [--prompt-file <file>] [--prompt <text>] [--yolium-mode] [--events-fd <N>]
 
 Run the headless agent loop. Reads prompt from AGENT_PROMPT_FILE (file)
 or AGENT_PROMPT (base64) or --prompt-file or --prompt.
 
 Flags:
+  --provider <name>  Use a named provider profile from the config file's
+                     "providers" object (endpoint, key, model, limits).
   --yolium-mode      Register yolium_* protocol tools, change loop-exit
                      semantics, and treat terminator tools (yolium_complete /
                      yolium_error / yolium_ask_question) as the sole way to
@@ -57,6 +59,7 @@ Environment:
 
 type agentFlags struct {
 	Model      string
+	Provider   string
 	Tools      string
 	PromptFile string
 	Prompt     string
@@ -80,6 +83,14 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 			i++
 		case strings.HasPrefix(args[i], "--model="):
 			f.Model = strings.TrimPrefix(args[i], "--model=")
+		case args[i] == "--provider":
+			if i+1 >= len(args) {
+				return f, errors.New("--provider requires a value")
+			}
+			f.Provider = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--provider="):
+			f.Provider = strings.TrimPrefix(args[i], "--provider=")
 		case args[i] == "--tools":
 			if i+1 >= len(args) {
 				return f, errors.New("--tools requires a value")
@@ -340,6 +351,19 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	ApplyEnvDefaults(cfg)
 
 	if !requireAPIKey(stderr) {
@@ -347,9 +371,17 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	}
 
 	model := resolveModel(flags.Model)
+	if model == "" {
+		// The selected profile (or flat config) may supply the model.
+		model = os.Getenv("YOLI_MODEL")
+	}
 	goal := readGoal()
 
-	fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+	if profileName != "" {
+		fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
+	} else {
+		fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+	}
 	preview := prompt
 	if len(preview) > 80 {
 		preview = preview[:80] + "..."

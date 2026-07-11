@@ -32,6 +32,7 @@ const (
 const tuiHelp = `commands:
   /help            show this list
   /model [slug]    show or switch the model
+  /provider [name] show or switch the provider profile
   /skill [name|off] show, set, or clear the active skill (Shift-Tab cycles)
   /context         show estimated context size
   /clear           start a new session
@@ -67,6 +68,11 @@ type tuiLoopConfig struct {
 	// activeSkill is the skill whose body is appended to the system
 	// prompt each turn ("" = none). Cycled with Shift-Tab or /skill.
 	activeSkill string
+	// profiles holds the named provider profiles loaded at startup;
+	// profileName is the active one ("" = flat YOLI_* config). Switched
+	// with /provider.
+	profiles    ProviderProfiles
+	profileName string
 }
 
 // cycleSkill advances the active skill through none → first → … → last
@@ -526,6 +532,19 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	ApplyEnvDefaults(cfg)
 	if !requireAPIKey(stderr) {
 		return 1
@@ -565,6 +584,8 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		contextWindow: contextWindow,
 		maxTokens:     maxTokens,
 		skillList:     skillList,
+		profiles:      profiles,
+		profileName:   profileName,
 		newSession: func() (*agentsession.Session, error) {
 			opts := agentsession.Options{RootDir: flags.SessionRoot, Cwd: cwd}
 			if flags.NoSession {
@@ -583,7 +604,11 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 	baseSystem := chatSystemPrompt(c.skillList)
 	if c.interactive {
-		fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
+		if c.profileName != "" {
+			fmt.Fprintf(stderr, "yoli tui — provider=%s model=%s session=%s (/help for commands)\n", c.profileName, c.model, c.sess.GetSessionID())
+		} else {
+			fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
+		}
 	}
 
 	// Create line editor for interactive mode (terminal)
@@ -744,8 +769,8 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 }
 
 // tuiSlashCommand handles a "/..." line. It returns true when the REPL
-// should exit. It may swap c.sess (/clear), c.model (/model), or
-// c.activeSkill (/skill).
+// should exit. It may swap c.sess (/clear), c.model (/model),
+// c.activeSkill (/skill), or c.provider and its limits (/provider).
 func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr io.Writer) bool {
 	fields := strings.Fields(line)
 	cmd, args := fields[0], fields[1:]
@@ -769,6 +794,50 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 		}
 		c.model = args[0]
 		fmt.Fprintf(stdout, "model set to %s\n", c.model)
+	case "/provider":
+		if len(args) == 0 {
+			active := c.profileName
+			if active == "" {
+				active = "(flat config)"
+			}
+			fmt.Fprintf(stdout, "provider: %s\n", active)
+			for _, name := range profileNames(c.profiles) {
+				p := c.profiles[name]
+				marker := ""
+				if name == c.profileName {
+					marker = " *"
+				}
+				model := p.Model
+				if model == "" {
+					model = "(inherited)"
+				}
+				fmt.Fprintf(stdout, "  %s: base_url=%s model=%s%s\n", name, p.BaseURL, model, marker)
+			}
+			return false
+		}
+		name := args[0]
+		prof, ok := c.profiles[name]
+		if !ok {
+			fmt.Fprintf(stderr, "unknown provider profile: %s\n", name)
+			return false
+		}
+		newProv, err := newProviderFromProfile(prof, "Yoli")
+		if err != nil {
+			fmt.Fprintf(stderr, "provider %s: %v\n", name, err)
+			return false
+		}
+		c.provider = newProv
+		c.profileName = name
+		if prof.Model != "" {
+			c.model = prof.Model
+		}
+		if prof.ContextWindow > 0 {
+			c.contextWindow = prof.ContextWindow
+		}
+		if prof.MaxTokens > 0 {
+			c.maxTokens = prof.MaxTokens
+		}
+		fmt.Fprintf(stdout, "provider set to %s (model: %s)\n", name, c.model)
 	case "/skill":
 		if len(args) == 0 {
 			active := c.activeSkill

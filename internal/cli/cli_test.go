@@ -608,3 +608,77 @@ func TestConfig_NoSubPrintsUsage(t *testing.T) {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
+
+func TestConfig_ProvidersListsProfilesWithoutAPIKeys(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"default_provider": "runpod",
+		"providers": {
+			"runpod": {"base_url":"https://pod/v1","api_key":"sekret-pod","model":"m1"},
+			"openrouter": {"base_url":"https://or/v1","api_key":"sekret-or"}
+		}
+	}`)
+	r := runCli(t, []string{"config", "providers"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("missing active runpod line: %q", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "openrouter: base_url=https://or/v1 model=(inherited)") {
+		t.Fatalf("missing openrouter line: %q", r.stdout)
+	}
+	if strings.Contains(r.stdout, "sekret") {
+		t.Fatalf("api key leaked to stdout: %q", r.stdout)
+	}
+}
+
+func TestConfig_ProvidersEmptyPrintsPlaceholder(t *testing.T) {
+	r := runCli(t, []string{"config", "providers"}, runOpts{})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "(no provider profiles defined)") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestConfig_SetPreservesProvidersObject(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"providers": {"runpod": {"base_url":"https://pod/v1","api_key":"k","context_window":57344}}
+	}`)
+	r := runCli(t, []string{"config", "set", "YOLI_MODEL", "new-model"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	body, err := os.ReadFile(filepath.Join(home, ".config", "yoli", "config.json"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var parsed struct {
+		Model     string           `json:"YOLI_MODEL"`
+		Providers ProviderProfiles `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.Model != "new-model" {
+		t.Fatalf("model not set: %s", body)
+	}
+	want := ProviderProfile{BaseURL: "https://pod/v1", APIKey: "k", ContextWindow: 57344}
+	if parsed.Providers["runpod"] != want {
+		t.Fatalf("providers object mangled: %s", body)
+	}
+}
+
+func writeUserConfig(t *testing.T, home, body string) {
+	t.Helper()
+	cfgDir := filepath.Join(home, ".config", "yoli")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+}

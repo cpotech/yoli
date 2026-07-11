@@ -220,7 +220,7 @@ func TestTUI_HelpListsCommandsWithoutProviderCall(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, cmd := range []string{"/help", "/model", "/context", "/clear", "/exit", "/quit"} {
+	for _, cmd := range []string{"/help", "/model", "/provider", "/context", "/clear", "/exit", "/quit"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Fatalf("help output missing %s: %q", cmd, stdout)
 		}
@@ -259,6 +259,81 @@ func TestTUI_ModelCommandWithoutArgPrintsCurrent(t *testing.T) {
 	}
 	if len(rec.reqs) != 0 {
 		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandListsProfilesWithoutAPIKeys(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{
+		"runpod":     {BaseURL: "https://pod/v1", APIKey: "sekret", Model: "m1"},
+		"openrouter": {BaseURL: "https://or/v1", APIKey: "sekret2"},
+	}
+	c.profileName = "runpod"
+	code, stdout, _ := runTUITest(t, c, "/provider\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "provider: runpod") {
+		t.Fatalf("active profile missing: %q", stdout)
+	}
+	if !strings.Contains(stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("runpod line missing star: %q", stdout)
+	}
+	if !strings.Contains(stdout, "openrouter: base_url=https://or/v1 model=(inherited)") {
+		t.Fatalf("openrouter line missing: %q", stdout)
+	}
+	if strings.Contains(stdout, "sekret") {
+		t.Fatalf("api key leaked: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandSwitchesProfileAndLimits(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{
+		"other": {BaseURL: "https://other/v1", APIKey: "k", Model: "other/model", ContextWindow: 4096, MaxTokens: 128},
+	}
+	code, stdout, _ := runTUITest(t, c, "/provider other\n/model\n/context\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "provider set to other (model: other/model)") {
+		t.Fatalf("switch confirmation missing: %q", stdout)
+	}
+	if !strings.Contains(stdout, "model: other/model") {
+		t.Fatalf("/model should show profile model: %q", stdout)
+	}
+	if !strings.Contains(stdout, "of 4k") {
+		t.Fatalf("/context should use profile window: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandUnknownNameKeepsState(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("ok")},
+	})}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{"real": {BaseURL: "https://r/v1", APIKey: "k"}}
+	code, stdout, stderr := runTUITest(t, c, "/provider nope\nhi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stderr, "unknown provider profile: nope") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if strings.Contains(stdout, "provider set to") {
+		t.Fatalf("should not switch: %q", stdout)
+	}
+	// The original (recording) provider still serves the next turn.
+	if len(rec.reqs) != 1 || rec.reqs[0].Model != "test/model" {
+		t.Fatalf("reqs = %+v", rec.reqs)
 	}
 }
 

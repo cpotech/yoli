@@ -182,6 +182,12 @@ vLLM server (e.g. on a RunPod GPU pod); see
 defaults can also be stored via `yoli config set` so they persist across
 shells. See [docs/configuration.md](docs/configuration.md).
 
+Multiple endpoints can be defined as named profiles under the `providers`
+key of the config file and selected with `--provider <name>` (on `chat`,
+`tui`, `run`, and `agent`), the `YOLI_PROVIDER` env var, the
+`default_provider` config key, or the `/provider` command inside the TUI.
+`yoli config providers` lists the defined profiles.
+
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.
 

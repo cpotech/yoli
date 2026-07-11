@@ -21,14 +21,26 @@ by pointing `base_url` at them — see [self-hosting.md](self-hosting.md).
   backend verbatim, e.g. `openai/gpt-4o` for OpenRouter or the exact
   served model name for a self-hosted server.
 
-## Provider selection today
+## Provider selection
 
-`yoli chat`, `yoli tui`, `yoli run --role <role>`, and `yoli agent`
-all target `OpenAICompatProvider` and read `YOLI_API_KEY` /
-`YOLI_BASE_URL` / `YOLI_MODEL` from the environment. `FauxProvider` is
-exported from `internal/ai/providers` and is available to programmatic
-callers and tests, but the CLI does not yet expose a `--provider` flag —
-the `default_provider` config key is reserved for that work.
+`yoli chat`, `yoli tui`, `yoli run --role <role>`, and `yoli agent` all
+target `OpenAICompatProvider`. Which endpoint it talks to is decided by
+named provider profiles defined under the `providers` key of the config
+file (see [configuration.md](configuration.md#provider-profiles)), with
+four selection surfaces:
+
+1. `--provider <name>` flag on `chat`, `tui`, `run`, and `agent`.
+2. `YOLI_PROVIDER` env var.
+3. `YOLI_PROVIDER` / `default_provider` config key.
+4. `/provider [name]` inside the TUI — lists profiles or switches the
+   endpoint, model, and context limits mid-session.
+
+Precedence is flag > env > config. Explicit selections (flag or env) of
+an unknown profile name are an error; a stale `default_provider` only
+warns. With no selection at all, the flat `YOLI_API_KEY` /
+`YOLI_BASE_URL` / `YOLI_MODEL` values are used directly, as before.
+`FauxProvider` is exported from `internal/ai/providers` for programmatic
+callers and tests only.
 
 ## Storing credentials
 

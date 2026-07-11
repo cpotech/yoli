@@ -9,7 +9,7 @@ import (
 const usage = `Usage: yoli [--loglevel info|error] <command>
 Commands:
   version              Print the yoli version
-  chat <prompt>        Run a one-shot agent chat via OpenRouter
+  chat <prompt>        Run a one-shot agent chat
   -p, --prompt <text>  Shorthand for ` + "`chat <text>`" + `
   tui                  Run an interactive line-based REPL
   run --role <role>    Run the stdio agent with the given role
@@ -17,6 +17,9 @@ Commands:
   session <list|...>   Inspect or operate on session files
   skills <list|show>   Inspect skills available to the agent
   config <get|set|...> Inspect or modify yoli configuration
+
+chat, tui, run, and agent accept --provider <name> to select a provider
+profile from the config file's "providers" object.
 
 Session options (may also precede chat):
   -c                   Continue the most recent session for the cwd
