@@ -18,9 +18,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /out/yoli /usr/local/bin/yoli
-# Built-in skills resolve to <dirname(binary)>/../skills, i.e.
-# /usr/local/skills for a binary installed in /usr/local/bin.
-COPY skills /usr/local/skills
 
 # The agent operates against whatever project is mounted at /work.
 WORKDIR /work

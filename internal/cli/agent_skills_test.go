@@ -11,6 +11,7 @@ import (
 	"yoli/internal/agent/yolium"
 	"yoli/internal/ai"
 	"yoli/internal/ai/providers"
+	builtinskills "yoli/skills"
 )
 
 // loadCLITestSkills writes one SKILL.md per (name, body) pair under a
@@ -160,7 +161,13 @@ func TestLoadSkillsForPrompt_LoadsFromUserDir(t *testing.T) {
 	}
 	var warn bytes.Buffer
 	got := loadSkillsForPrompt(&warn)
-	if len(got) != 1 || got[0].Name != "homeskill" {
+	// The embedded built-ins (plan) are always present alongside the
+	// user skill.
+	names := make(map[string]bool)
+	for _, s := range got {
+		names[s.Name] = true
+	}
+	if !names["homeskill"] || !names["plan"] {
 		t.Fatalf("got %+v", got)
 	}
 	if warn.Len() != 0 {
@@ -193,10 +200,11 @@ func TestLoadSkillsForPrompt_WarnsAndReturnsNilOnError(t *testing.T) {
 	}
 }
 
-// TestBuiltInPlanSkillParses guards the committed built-in skill: it must
-// load through the real loader with a description and trigger.
+// TestBuiltInPlanSkillParses guards the embedded built-in skill bundle:
+// the plan skill must load through the real loader with a description
+// and trigger, and its body must expand from the embedded filesystem.
 func TestBuiltInPlanSkillParses(t *testing.T) {
-	got, err := skills.Load(skills.LoadOptions{BuiltInDir: filepath.Join("..", "..", "skills")})
+	got, err := skills.Load(skills.LoadOptions{BuiltIn: builtinskills.FS})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}

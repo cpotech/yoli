@@ -350,12 +350,14 @@ func TestSkills_UnknownSubMentionsIt(t *testing.T) {
 	}
 }
 
-func TestSkills_ListEmptyState(t *testing.T) {
+func TestSkills_ListShowsEmbeddedBuiltIns(t *testing.T) {
+	// With no project or user skills, the embedded built-ins are still
+	// listed — they ship inside the binary, so the list is never empty.
 	r := runCli(t, []string{"skills", "list"}, runOpts{cwd: t.TempDir()})
 	if r.exitCode != 0 {
 		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
 	}
-	if !strings.Contains(r.stdout, "No skills") {
+	if !strings.Contains(r.stdout, "plan") || !strings.Contains(r.stdout, "built-in") {
 		t.Fatalf("stdout = %q", r.stdout)
 	}
 }

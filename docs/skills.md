@@ -11,23 +11,24 @@ Skills live in three locations, searched in order of precedence:
 
 1. **Project** — `./.yoli/skills/<name>/SKILL.md`
 2. **User** — `~/.yoli/skills/<name>/SKILL.md`
-3. **Built-in** — bundled next to the `yoli` CLI entry point (resolved
-   relative to the binary's own directory).
+3. **Built-in** — embedded in the `yoli` binary itself (compiled in from
+   the repo's `skills/` directory via `go:embed`).
 
 A project skill overrides a user skill of the same name, which overrides a
 built-in.
 
-The built-in directory resolves relative to the *installed* binary:
-`dist/yoli-linux-amd64` sees the repo's `skills/`, a container binary at
-`/usr/local/bin/yoli` sees `/usr/local/skills` (the Dockerfile copies the
-repo's `skills/` there), and a dev binary at the repo root looks *outside*
-the repo — use the dist binary when testing built-ins.
+Because built-ins travel inside the binary, they are available in any
+repository and any installation location — no directory needs to ship
+alongside the executable.
 
 ## Built-in skills
 
 - **plan** (`skills/plan/SKILL.md`) — analyze the codebase and produce a
   structured implementation plan (ordered steps, files to modify,
   acceptance criteria, test specifications) without writing code.
+
+To add a new built-in, create `skills/<name>/SKILL.md` in the repo and
+rebuild; the embed pattern picks up every `*/SKILL.md` automatically.
 
 ## SKILL.md format
 

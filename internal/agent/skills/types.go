@@ -1,7 +1,11 @@
-// Package skills loads, lists, and expands user-authored "skill"
-// directories (each containing a SKILL.md with YAML frontmatter) so the
-// agent can advertise and lazily fetch their bodies on demand.
+// Package skills loads, lists, and expands "skill" directories (each
+// containing a SKILL.md with YAML frontmatter) so the agent can advertise
+// and lazily fetch their bodies on demand. Project and user skills live
+// on disk; built-in skills are served from an embedded filesystem
+// compiled into the binary.
 package skills
+
+import "io/fs"
 
 // Origin is where a skill was loaded from: a project-local directory, a
 // user-level directory, or the binary's built-in bundle.
@@ -21,6 +25,9 @@ type LoadedSkill struct {
 	Frontmatter map[string]any
 	BodyPath    string
 	Origin      Origin
+	// fsys, when non-nil, is the filesystem BodyPath is relative to
+	// (embedded built-ins). Nil means BodyPath is an OS path.
+	fsys fs.FS
 }
 
 // Trigger returns the frontmatter `trigger` string, or "" when absent
