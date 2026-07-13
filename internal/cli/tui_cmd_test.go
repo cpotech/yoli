@@ -195,6 +195,105 @@ func TestTUIEditor_UserInputPlainWhenColorDisabled(t *testing.T) {
 	}
 }
 
+// TestTUIEditor_WrappedLineClearsAllRows is the regression test for the
+// "wrapped line duplicates on the next redraw" bug. A single logical line
+// wider than the terminal wraps onto multiple visual rows; redrawLine must
+// move the cursor up by the full visual-row count (not just the logical
+// line count) so that \r\x1b[J clears every wrapped row. Otherwise the
+// stale upper rows remain and the redrawn text overlaps them, looking
+// duplicated.
+func TestTUIEditor_WrappedLineClearsAllRows(t *testing.T) {
+	// 40-column terminal; a 100-char line wraps onto 3 visual rows.
+	const width = 40
+	prefix := "> "
+	long := strings.Repeat("x", 100)
+	e := &tuiLineEditor{
+		stdout: bufio.NewWriter(io.Discard),
+		prefix: prefix,
+		width:  width,
+		prompt: long,
+		cursor: len(long),
+	}
+
+	// After the first draw curRow records how many visual rows the buffer
+	// occupies minus one. 100 chars + 2-char prefix, width 40:
+	// ceil(102/40) = 3 rows => curRow should be 2.
+	e.redrawLine()
+	if e.curRow != 2 {
+		t.Fatalf("first draw curRow = %d, want 2 (3 wrapped rows)", e.curRow)
+	}
+
+	// Simulate the cursor sitting at the end of the last visual row, then
+	// a second redraw (e.g. the next keystroke) must move UP by curRow
+	// rows before clearing. Capture the emitted escape sequences.
+	var buf bytes.Buffer
+	e.stdout = bufio.NewWriter(&buf)
+	e.curRow = 2 // cursor left at bottom visual row from prior draw
+	e.redrawLine()
+	out := buf.String()
+
+	// Must move up the full 2 rows before clearing, so "\x1b[2A\r\x1b[J".
+	if !strings.Contains(out, "\x1b[2A") {
+		t.Fatalf("expected move-up of 2 rows before clearing; got %q", out)
+	}
+	if !strings.Contains(out, "\r\x1b[J") {
+		t.Fatalf("expected clear-to-end-of-screen; got %q", out)
+	}
+	// And it must not contain a leftover single-line move-up that would
+	// miss the wrapped rows.
+	if strings.Contains(out, "\x1b[1A") && !strings.Contains(out, "\x1b[2A") {
+		t.Fatalf("moved up only 1 row, missing wrapped rows; got %q", out)
+	}
+}
+
+// TestTUIEditor_VisualRowCount checks the wrapping math used by redrawLine.
+func TestTUIEditor_VisualRowCount(t *testing.T) {
+	cases := []struct {
+		screenLen, width, want int
+	}{
+		{0, 40, 1},   // empty line: one row
+		{1, 40, 1},   // fits
+		{40, 40, 1},  // exactly fills one row
+		{41, 40, 2},  // one char wraps
+		{80, 40, 2},  // exactly two rows
+		{81, 40, 3},  // three rows
+		{100, 40, 3}, // matches the regression scenario
+		{100, 0, 1},  // unknown width: assume no wrap
+	}
+	for _, c := range cases {
+		if got := visualRowCount(c.screenLen, c.width); got != c.want {
+			t.Errorf("visualRowCount(%d,%d) = %d, want %d", c.screenLen, c.width, got, c.want)
+		}
+	}
+}
+
+// TestTUIEditor_CursorSubRowForWrappedLine verifies that, on a wrapped
+// line, the cursor's column is reported modulo the terminal width so it
+// lands on the correct wrapped sub-row rather than the first row.
+func TestTUIEditor_CursorSubRowForWrappedLine(t *testing.T) {
+	const width = 40
+	prefix := "> "
+	e := &tuiLineEditor{
+		stdout: bufio.NewWriter(io.Discard),
+		prefix: prefix,
+		width:  width,
+		prompt: strings.Repeat("x", 100), // 102 cols incl. prefix => 3 rows
+		cursor: 45,                        // 2-char prefix + 43 => col 45 -> 2nd visual row
+	}
+	e.redrawLine()
+	// rows: line0 has 3 visual rows (102 cols). cursor col 45 -> row index
+	// 45/40 == 1, so cursorRow == 1; total rows == 3 => up == 1.
+	if e.curRow != 2 {
+		t.Fatalf("curRow after draw = %d, want 2", e.curRow)
+	}
+	var buf bytes.Buffer
+	e.stdout = bufio.NewWriter(&buf)
+	e.redrawLine()
+	if !strings.Contains(buf.String(), "\x1b[1A") {
+		t.Fatalf("expected move up 1 visual row for cursor on 2nd wrapped sub-row; got %q", buf.String())
+	}
+}
+
 func TestTUI_NoSpinnerOrPromptWhenNotInteractive(t *testing.T) {
 	faux := providers.NewFauxProvider([]ai.ChatResponse{
 		{Content: strptr("reply")},

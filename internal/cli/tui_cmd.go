@@ -202,7 +202,8 @@ type tuiLineEditor struct {
 	histIdx int           // current position in history (-1 = new prompt)
 	prompt  string        // current input buffer (may contain '\n' from paste)
 	cursor  int           // cursor position within prompt (0 = beginning)
-	curRow  int           // visual row of the cursor within the rendered buffer
+	curRow  int           // visual (wrapped) row of the cursor within the rendered buffer
+	width   int           // terminal width in columns (>=1); 0 means "unknown"
 	prefix  string        // prompt prefix rendered before the first row
 	// color paints the typed buffer green so the user's own comments
 	// stand out from assistant/tool output in the scrollback. Gated on
@@ -260,6 +261,15 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 		return "", false, err
 	}
 	defer term.Restore(e.stdin, prev)
+
+	// Resolve the terminal width so redrawLine can account for line
+	// wrapping. If it can't be measured we fall back to a wide value so
+	// wrapping math never divides by zero or underestimates.
+	if w, _, err := term.GetSize(e.stdin); err == nil && w > 0 {
+		e.width = w
+	} else {
+		e.width = 0
+	}
 
 	// Enable bracketed paste so the terminal wraps pasted text in
 	// ESC[200~ … ESC[201~. Without this, embedded newlines arrive as bare
@@ -470,11 +480,51 @@ func (e *tuiLineEditor) insertPaste() {
 	e.redrawLine()
 }
 
+// visualRowCount returns how many visual (wrapped) rows a logical line of
+// the given on-screen column length occupies. A line of L columns wraps
+// onto 1 + floor((L-1)/width) rows once it exceeds the terminal width; an
+// empty line (L<=0) still takes one row on screen. When width is unknown
+// (<=0, e.g. redraw before the terminal size is measured) we assume no
+// wrapping and report a single row.
+func visualRowCount(screenLen, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if screenLen <= 0 {
+		return 1
+	}
+	return 1 + (screenLen-1)/width
+}
+
+// screenLen returns the on-screen column length of the logical line at
+// index i, adding the prompt prefix width for the first line (i == 0).
+func (e *tuiLineEditor) screenLen(lines []string, i int) int {
+	l := len(lines[i])
+	if i == 0 {
+		l += len(e.prefix)
+	}
+	return l
+}
+
 // redrawLine redraws the current buffer, which may span multiple rows when
-// it contains newlines from a paste. It assumes no single logical line
-// exceeds the terminal width (line wrapping is not accounted for).
+// it contains newlines from a paste, and crucially when a single logical
+// line is wider than the terminal and the terminal wraps it onto several
+// visual rows. The cursor's vertical position is tracked in *visual* rows
+// (accounting for wrapping), not logical lines, so the stale wrapped rows
+// from the previous draw are always cleared — otherwise the freshly drawn
+// buffer overlapped the leftover text and the line appeared duplicated.
 func (e *tuiLineEditor) redrawLine() {
-	// Return to the first rendered row, then clear it and everything below.
+	lines := strings.Split(e.prompt, "\n")
+	width := e.width
+
+	// Total visual rows the buffer currently occupies on screen.
+	totalRows := 0
+	for i := range lines {
+		totalRows += visualRowCount(e.screenLen(lines, i), width)
+	}
+
+	// Return to the first rendered row (the cursor was left at the end of
+	// the last visual row), then clear it and everything below.
 	if e.curRow > 0 {
 		fmt.Fprintf(e.stdout, "\x1b[%dA", e.curRow)
 	}
@@ -483,7 +533,6 @@ func (e *tuiLineEditor) redrawLine() {
 	// Print the buffer, prefixing the first row with the prompt prefix
 	// and breaking rows with CRLF (raw mode needs the explicit carriage
 	// return).
-	lines := strings.Split(e.prompt, "\n")
 	for i, ln := range lines {
 		if i == 0 {
 			e.stdout.WriteString(e.prefix + tuiPaint(ln, ansiGreen, e.color))
@@ -492,24 +541,35 @@ func (e *tuiLineEditor) redrawLine() {
 		}
 	}
 
-	// Locate the cursor's target row/column from its byte offset.
+	// Locate the cursor's target visual row/column from its byte offset.
 	before := e.prompt[:e.cursor]
-	targetRow := strings.Count(before, "\n")
-	col := len(before) - (strings.LastIndexByte(before, '\n') + 1)
-	if targetRow == 0 {
-		col += len(e.prefix)
+	targetLogical := strings.Count(before, "\n")
+	colInLine := len(before) - (strings.LastIndexByte(before, '\n') + 1)
+	screenCol := colInLine
+	if targetLogical == 0 {
+		screenCol += len(e.prefix)
 	}
+	// Walk the logical lines before the cursor line, accumulating their
+	// visual-row height, then add the cursor's sub-row within its line.
+	cursorRow := 0
+	for i := 0; i < targetLogical; i++ {
+		cursorRow += visualRowCount(e.screenLen(lines, i), width)
+	}
+	cursorRow += screenCol / max(width, 1)
 
-	// The cursor currently sits at the end of the last row; move it to the
-	// target position.
-	if up := (len(lines) - 1) - targetRow; up > 0 {
+	// The cursor currently sits at the end of the last visual row; move it
+	// up to the target position. cursorRow is bounded by totalRows-1, so
+	// this is never negative.
+	if up := (totalRows - 1) - cursorRow; up > 0 {
 		fmt.Fprintf(e.stdout, "\x1b[%dA", up)
 	}
 	e.stdout.WriteString("\r")
-	if col > 0 {
-		fmt.Fprintf(e.stdout, "\x1b[%dC", col)
+	if width > 0 {
+		if col := screenCol % width; col > 0 {
+			fmt.Fprintf(e.stdout, "\x1b[%dC", col)
+		}
 	}
-	e.curRow = targetRow
+	e.curRow = totalRows - 1
 	e.stdout.Flush()
 }
 
