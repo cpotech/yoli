@@ -43,7 +43,13 @@ services:
       retries: 15
 
   yoli:
-    build: .
+    build:
+      context: .
+      # Stamp the same version the host `scripts/build.sh` produces so the
+      # containerized yoli reports a real version instead of "dev". Falls
+      # back to a git describe / "dev" value inside the Dockerfile.
+      args:
+        - YOLI_VERSION=${YOLI_VERSION:-}
     depends_on:
       netfw:
         condition: service_healthy

@@ -71,7 +71,14 @@ fi
 # Build the image if it is missing, or when explicitly forced.
 if [[ "${FORCE_BUILD:-}" == "1" ]] || ! docker image inspect "$image" >/dev/null 2>&1; then
   echo "yoli-docker: building image $image" >&2
-  docker build -t "$image" "$repo_root"
+  # Stamp the same version the host `scripts/build.sh` would use so
+  # `yoli version` inside the container is not just "dev".
+  if [[ -z "${YOLI_VERSION:-}" ]] && command -v git >/dev/null 2>&1 \
+      && git -C "$repo_root" rev-parse --git-dir >/dev/null 2>&1; then
+    YOLI_VERSION="$(git -C "$repo_root" describe --tags --dirty --always 2>/dev/null || true)"
+  fi
+  YOLI_VERSION="${YOLI_VERSION:-dev}" docker build \
+    --build-arg "YOLI_VERSION=${YOLI_VERSION}" -t "$image" "$repo_root"
 fi
 
 run_args=(--rm -v "$PWD":/work)

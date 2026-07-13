@@ -200,6 +200,22 @@ inside the TUI. `yoli config providers` lists the defined profiles.
 go test ./...
 ```
 
+## Building & versions
+
+Every build stamps a version into the binary (`yoli/internal/cli.Version`),
+reported by `yoli version`. The version comes from `git describe --tags
+--dirty --always`:
+
+- with a reachable tag: `v0.1.0` or `v0.1.0-3-ga011326-dirty` (commits since tag + sha + dirty tree),
+- without a tag: the short commit sha (optionally `-dirty`),
+- with no git or linker flag: `dev`.
+
+The version is applied consistently across build paths:
+
+- **Host build** — `scripts/build.sh` (honors `GOOS`/`GOARCH`, `OUTPUT`, `YOLI_VERSION`).
+- **Docker** — `Dockerfile` and `docker-compose.egress.yml` inject the version via a `YOLI_VERSION` build arg, so containerized `yoli version` is not just `dev`. `scripts/yoli-docker.sh` passes the host's git-derived version through automatically.
+- **Releases** — `scripts/release.sh <version>` (e.g. `v0.2.0`) creates an annotated git tag and cross-compiles versioned binaries into `dist/` (`yoli-<os>-<arch>` for linux/darwin × amd64/arm64), rebuilding the root `yoli` with the same version. Push the tag with `git push origin <version>` to publish.
+
 ## Docs
 
 - [Architecture](docs/architecture.md)
