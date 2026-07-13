@@ -239,25 +239,17 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if !requireAPIKey(stderr) {
-		return 1
-	}
-	model := os.Getenv("YOLI_MODEL")
+	model := prof.Model
 	rank := logRank(flags.LogLevel)
 	if rank >= logRankInfo {
-		if profileName != "" {
-			fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
-		} else {
-			fmt.Fprintf(stderr, "yoli: model=%s\n", model)
-		}
+		fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
 	}
-	provider, err := newProviderFromEnv("Yoli")
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -265,10 +257,11 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	cwd, _ := os.Getwd()
 	exe, _ := os.Executable()
 	toolset := append(
-		tools.DefaultTools(cwd),
+		tools.DefaultTools(cwd, cfg["BRAVE_API_KEY"]),
 		tools.NewSubAgentTool(tools.SubAgentOptions{
-			CLIEntry:     exe,
-			DefaultModel: model,
+			CLIEntry: exe,
+			Provider: profileName,
+			Model:    model,
 		}),
 	)
 	skillList := loadSkillsForPrompt(stderr)
@@ -285,7 +278,7 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 	seed = append(seed, sess.BuildMessages()...)
 	seed = append(seed, ai.Message{Role: ai.RoleUser, Content: &user})
-	contextWindow, maxTokens := resolveContextLimits(stderr)
+	contextWindow, maxTokens := contextLimits(prof)
 	if rank >= logRankInfo {
 		fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), contextWindow))
 	}

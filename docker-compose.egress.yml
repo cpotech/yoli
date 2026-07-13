@@ -6,10 +6,8 @@
 # namespace with `network_mode: "service:netfw"`, so the rules cover all of
 # yoli's traffic — every protocol, not just HTTP.
 #
-# Usage:
-#   export YOLI_API_KEY=...              # required
-#   export YOLI_BASE_URL=...             # optional, OpenAI-compatible endpoint
-#   export BRAVE_API_KEY=...             # optional, for web search
+# Usage (credentials come from ~/.config/yoli/config.json, mounted below —
+# yoli does not read settings from the environment):
 #   docker compose -f docker-compose.egress.yml run --rm yoli            # tui
 #   docker compose -f docker-compose.egress.yml run --rm yoli chat "hi"  # one-shot
 #
@@ -54,17 +52,10 @@ services:
     working_dir: /work
     volumes:
       - ${YOLI_WORKDIR:-.}:/work
-      # Mount the host yoli config (read-only) so yoli reads stored keys and
-      # default_model itself. The container runs as root -> /root/.config/yoli.
+      # Mount the host yoli config (read-only) — the only settings source;
+      # yoli ignores env vars. The container runs as root -> /root/.config/yoli.
       # Override the host path with YOLI_CONFIG_DIR if it lives elsewhere.
       - ${YOLI_CONFIG_DIR:-$HOME/.config/yoli}:/root/.config/yoli:ro
-    environment:
-      # Env vars override the config file when set; otherwise the mounted
-      # config above supplies the credentials.
-      YOLI_API_KEY: ${YOLI_API_KEY:-}
-      YOLI_BASE_URL: ${YOLI_BASE_URL:-}
-      YOLI_MODEL: ${YOLI_MODEL:-}
-      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
 
 networks:
   egress:

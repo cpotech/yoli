@@ -69,8 +69,7 @@ type tuiLoopConfig struct {
 	// prompt each turn ("" = none). Cycled with Shift-Tab or /skill.
 	activeSkill string
 	// profiles holds the named provider profiles loaded at startup;
-	// profileName is the active one ("" = flat YOLI_* config). Switched
-	// with /provider.
+	// profileName is the active one. Switched with /provider.
 	profiles    ProviderProfiles
 	profileName string
 }
@@ -540,17 +539,13 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if !requireAPIKey(stderr) {
-		return 1
-	}
-	model := os.Getenv("YOLI_MODEL")
-	provider, err := newProviderFromEnv("Yoli")
+	model := prof.Model
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -558,12 +553,13 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	cwd, _ := os.Getwd()
 	exe, _ := os.Executable()
 	toolset := append(
-		tools.DefaultTools(cwd),
-		// Note: the sub-agent tool captures the startup model; /model
-		// switches the REPL's chat model only.
+		tools.DefaultTools(cwd, cfg["BRAVE_API_KEY"]),
+		// Note: the sub-agent tool captures the startup provider and
+		// model; /provider and /model switch the REPL's chat only.
 		tools.NewSubAgentTool(tools.SubAgentOptions{
-			CLIEntry:     exe,
-			DefaultModel: model,
+			CLIEntry: exe,
+			Provider: profileName,
+			Model:    model,
 		}),
 	)
 	skillList := loadSkillsForPrompt(stderr)
@@ -575,7 +571,7 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	contextWindow, maxTokens := resolveContextLimits(stderr)
+	contextWindow, maxTokens := contextLimits(prof)
 	return runTUILoop(tuiLoopConfig{
 		provider:      provider,
 		model:         model,
@@ -796,11 +792,7 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 		fmt.Fprintf(stdout, "model set to %s\n", c.model)
 	case "/provider":
 		if len(args) == 0 {
-			active := c.profileName
-			if active == "" {
-				active = "(flat config)"
-			}
-			fmt.Fprintf(stdout, "provider: %s\n", active)
+			fmt.Fprintf(stdout, "provider: %s\n", c.profileName)
 			for _, name := range profileNames(c.profiles) {
 				p := c.profiles[name]
 				marker := ""
@@ -809,7 +801,7 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 				}
 				model := p.Model
 				if model == "" {
-					model = "(inherited)"
+					model = "(unset)"
 				}
 				fmt.Fprintf(stdout, "  %s: base_url=%s model=%s%s\n", name, p.BaseURL, model, marker)
 			}
@@ -831,12 +823,7 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 		if prof.Model != "" {
 			c.model = prof.Model
 		}
-		if prof.ContextWindow > 0 {
-			c.contextWindow = prof.ContextWindow
-		}
-		if prof.MaxTokens > 0 {
-			c.maxTokens = prof.MaxTokens
-		}
+		c.contextWindow, c.maxTokens = contextLimits(prof)
 		fmt.Fprintf(stdout, "provider set to %s (model: %s)\n", name, c.model)
 	case "/skill":
 		if len(args) == 0 {

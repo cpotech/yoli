@@ -202,11 +202,15 @@ func TestSubAgent_ThrowsAtMaxDepth(t *testing.T) {
 	}
 }
 
-func TestSubAgent_DefaultModelExportsOpenRouterModel(t *testing.T) {
+func TestSubAgent_PassesProviderAndModelFlags(t *testing.T) {
 	t.Setenv("YOLI_SUBAGENT_DEPTH", "")
-	d := runDumper(t, SubAgentOptions{DefaultModel: "anthropic/claude-3.5-sonnet"}, "coder", "x")
-	if d.Env["YOLI_MODEL"] != "anthropic/claude-3.5-sonnet" {
-		t.Fatalf("model = %v", d.Env["YOLI_MODEL"])
+	d := runDumper(t, SubAgentOptions{Provider: "openrouter", Model: "anthropic/claude-3.5-sonnet"}, "coder", "x")
+	args := strings.Join(d.Args, " ")
+	if !strings.Contains(args, "--provider openrouter") {
+		t.Fatalf("args missing --provider: %v", d.Args)
+	}
+	if !strings.Contains(args, "--model anthropic/claude-3.5-sonnet") {
+		t.Fatalf("args missing --model: %v", d.Args)
 	}
 }
 

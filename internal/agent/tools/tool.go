@@ -25,8 +25,9 @@ type Tool interface {
 // DefaultTools returns the standard tool set rooted at cwd: read_file,
 // write_file, list_dir, run_bash, edit, glob, grep, web_search. Git
 // operations are performed via run_bash; the host orchestrator owns
-// branch, merge, push, and PR workflows.
-func DefaultTools(cwd string) []Tool {
+// branch, merge, push, and PR workflows. braveAPIKey credentials the
+// web_search tool; empty disables it at call time with a clear error.
+func DefaultTools(cwd, braveAPIKey string) []Tool {
 	return []Tool{
 		NewReadFileTool(cwd),
 		NewWriteFileTool(cwd),
@@ -35,6 +36,6 @@ func DefaultTools(cwd string) []Tool {
 		NewEditTool(cwd),
 		NewGlobTool(cwd),
 		NewGrepTool(cwd),
-		NewWebSearchTool(),
+		NewWebSearchTool(braveAPIKey),
 	}
 }

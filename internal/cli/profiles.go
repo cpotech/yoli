@@ -8,8 +8,9 @@ import (
 )
 
 // ProviderProfile is one named OpenAI-compatible endpoint definition,
-// stored under the "providers" key of a config file. Unset optional
-// fields fall back to the flat YOLI_* keys / environment.
+// stored under the "providers" key of a config file. base_url and
+// api_key are required to reach an endpoint; context_window and
+// max_tokens fall back to the agent defaults when unset.
 type ProviderProfile struct {
 	BaseURL       string `json:"base_url"`
 	APIKey        string `json:"api_key"`

@@ -9,14 +9,14 @@ import (
 	"io"
 	"iter"
 	"net/http"
-	"os"
 	"strings"
 
 	"yoli/internal/ai"
 )
 
-// OpenAICompatOptions configures a new OpenAICompatProvider. BaseURL is
-// required (set via YOLI_BASE_URL or the config file).
+// OpenAICompatOptions configures a new OpenAICompatProvider. APIKey and
+// BaseURL are required (sourced from the active provider profile by the
+// CLI).
 type OpenAICompatOptions struct {
 	APIKey     string
 	BaseURL    string
@@ -36,21 +36,18 @@ type OpenAICompatProvider struct {
 }
 
 // NewOpenAICompatProvider validates options and returns a ready provider.
-// Returns an error if no API key is available via opts or environment.
+// Returns an error if no API key is supplied in opts.
 func NewOpenAICompatProvider(opts OpenAICompatOptions) (*OpenAICompatProvider, error) {
 	key := opts.APIKey
 	if key == "" {
-		key = os.Getenv("YOLI_API_KEY")
-	}
-	if key == "" {
 		return nil, errors.New(
-			"API key missing — set the YOLI_API_KEY env var or pass opts.APIKey",
+			"API key missing — set \"api_key\" in the provider profile or pass opts.APIKey",
 		)
 	}
 	baseURL := opts.BaseURL
 	if baseURL == "" {
 		return nil, errors.New(
-			"base URL missing — set the YOLI_BASE_URL env var, the config file, or pass opts.BaseURL",
+			"base URL missing — set \"base_url\" in the provider profile or pass opts.BaseURL",
 		)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
@@ -239,7 +236,7 @@ func (p *OpenAICompatProvider) send(
 			msg += " — " + string(text)
 		}
 		if isContextOverflow(string(text)) {
-			msg += " (hint: set YOLI_CONTEXT_WINDOW to your server's context limit)"
+			msg += " (hint: set \"context_window\" in the provider profile to your server's context limit)"
 			return nil, &ai.ContextOverflowError{StatusCode: resp.StatusCode, Message: msg}
 		}
 		return nil, errors.New(msg)
@@ -251,7 +248,7 @@ func (p *OpenAICompatProvider) send(
 // context-window overflow from an OpenAI-compatible backend (vLLM,
 // OpenRouter, …). The phrasing varies by server, so we match the common
 // substrings case-insensitively. This is the discovery path that points
-// the user at YOLI_CONTEXT_WINDOW.
+// the user at the profile's context_window field.
 func isContextOverflow(body string) bool {
 	b := strings.ToLower(body)
 	return strings.Contains(b, "context length") ||

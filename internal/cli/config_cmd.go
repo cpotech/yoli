@@ -111,12 +111,12 @@ func runConfigProviders(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	active, _ := resolveProviderName(cfg, "")
+	active := cfg["default_provider"]
 	for _, name := range profileNames(profiles) {
 		p := profiles[name]
 		model := p.Model
 		if model == "" {
-			model = "(inherited)"
+			model = "(unset)"
 		}
 		marker := ""
 		if name == active {

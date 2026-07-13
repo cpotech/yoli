@@ -12,9 +12,9 @@ Provider-agnostic AI abstractions. Defines the `Provider` and `Tool`
 interfaces that the rest of the system targets, plus the built-in providers
 under `internal/ai/providers`: `FauxProvider` and `OpenRouterProvider`.
 
-Providers are pure: they read credentials from environment variables and
-expose a uniform streaming interface. They have no knowledge of how the
-agent is hosted (CLI, Yolium protocol, sub-agent).
+Providers are pure: they receive credentials explicitly through their
+options structs and expose a uniform streaming interface. They have no
+knowledge of how the agent is hosted (CLI, Yolium protocol, sub-agent).
 
 ## `internal/agent`
 
@@ -55,10 +55,10 @@ The `yoli` command-line entry point. Owns:
   the loop so seed messages, the user prompt, and every assistant/tool
   reply land on disk in one place.
 - The user/project config layer (see [configuration.md](configuration.md)).
-  The CLI is the only layer that reads config files; providers continue to
-  read `os.Getenv`, so the CLI exports stored config values into the
-  process environment via `ApplyEnvDefaults` before delegating to the
-  agent.
+  The CLI is the only layer that reads config files; it folds the active
+  provider profile into the loaded config and passes the resulting values
+  explicitly to providers and tools before delegating to the agent. The
+  process environment never carries settings.
 
 ## Dependency direction
 

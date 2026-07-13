@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"yoli/internal/agent"
@@ -13,6 +12,7 @@ import (
 type runFlags struct {
 	Role     string
 	Provider string
+	Model    string
 }
 
 func parseRunFlags(args []string) (runFlags, error) {
@@ -36,6 +36,14 @@ func parseRunFlags(args []string) (runFlags, error) {
 			i++
 		case strings.HasPrefix(arg, "--provider="):
 			f.Provider = strings.TrimPrefix(arg, "--provider=")
+		case arg == "--model":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--model requires a value")
+			}
+			f.Model = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--model="):
+			f.Model = strings.TrimPrefix(arg, "--model=")
 		default:
 			return f, fmt.Errorf("Unknown flag for run: %s", arg)
 		}
@@ -80,16 +88,13 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if _, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr); err != nil {
+	prof, _, err := selectProviderProfile(cfg, profiles, flags.Provider)
+	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if !requireAPIKey(stderr) {
-		return 1
-	}
-	model := os.Getenv("YOLI_MODEL")
-	provider, err := newProviderFromEnv("Yoli")
+	model := firstNonEmpty(flags.Model, prof.Model)
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

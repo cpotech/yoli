@@ -21,10 +21,11 @@ const (
 	// by every OpenAI-compatible provider we route through.
 	DefaultMaxOutputTokens = 8192
 	// DefaultContextBudget is the fallback TOTAL context window (input +
-	// output) when neither RunOptions.ContextBudgetTokens nor
-	// YOLI_CONTEXT_WINDOW is set. The loop reserves output headroom out of
-	// this window before compacting input (see computeInputBudget), so the
-	// requested input + output can never exceed it.
+	// output) when neither RunOptions.ContextBudgetTokens nor the
+	// profile's context_window is set. The loop reserves output headroom
+	// out of this window before compacting input (see
+	// computeInputBudget), so the requested input + output can never
+	// exceed it.
 	DefaultContextBudget   = 180_000
 	DefaultToolOutputBytes = 65_536
 )

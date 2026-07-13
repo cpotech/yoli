@@ -52,17 +52,14 @@ use and runs yoli with the current directory mounted. Arguments pass straight
 through to yoli:
 
 ```bash
-export YOLI_API_KEY=...           # your key
 scripts/yoli-docker.sh       # interactive tui
 FORCE_BUILD=1 scripts/yoli-docker.sh ... # rebuild the image first
 ```
 
-Credentials come from one of two places: `YOLI_API_KEY` (plus the optional
-`YOLI_BASE_URL`, `YOLI_MODEL`, and `BRAVE_API_KEY`) forwarded from your
-environment, or — if those aren't set — your host config at
-`~/.config/yoli/config.json`, which the script mounts read-only so yoli
-reads the stored keys and `default_model` itself. Set them once with
-`yoli config set` and the container picks them up. See
+Credentials come from your host config at `~/.config/yoli/config.json`,
+which the script mounts read-only so yoli reads the provider profiles
+itself — yoli does not read settings from the environment. Define a
+profile once and the container picks it up. See
 [docs/configuration.md](docs/configuration.md).
 
 ### Locking down the network (firewall)
@@ -73,7 +70,6 @@ endpoints are blocked; no inbound access.** Just add `FIREWALL=1` to the
 wrapper script:
 
 ```bash
-export YOLI_API_KEY=...                       # required
 FIREWALL=1 scripts/yoli-docker.sh             # interactive tui
 FIREWALL=1 scripts/yoli-docker.sh chat "hi"   # one-shot chat
 ```
@@ -124,7 +120,7 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `yoli config path` | Print the resolved user config file path. |
 | `yoli config get <key>` | Print the effective value of a known config key. |
 | `yoli config set <key> <value>` | Persist a value into the user config file. |
-| `yoli config list` | Print every known key with its value and source (`env`, `project`, `user`, or `default`). |
+| `yoli config list` | Print every known key with its value and source (`project`, `user`, or `default`). |
 
 ### `yoli agent` flags
 
@@ -139,10 +135,17 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `--fork <path\|id>` | `AGENT_FORK` | Fork a source session into a new session whose `parentSession` is the source. |
 | `--continue` | `AGENT_CONTINUE` | Continue the most recent session for the cwd. |
 | `--no-session` | *(none)* | Run without writing a session file. |
-| *(env only)* | `YOLI_API_KEY` | Required. May also come from `yoli config set api_key`. |
-| *(env only)* | `YOLI_BASE_URL` | Optional OpenAI-compatible endpoint; defaults to OpenRouter. See [docs/self-hosting.md](docs/self-hosting.md). |
-| *(env only)* | `YOLI_CONTEXT_WINDOW` | Total context window in tokens (input + output). Set to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom and never overflows. Default 180000. |
-| *(env only)* | `YOLI_MAX_TOKENS` | Per-turn output-token cap (default 8192); lower it to leave more of the window for input. |
+
+Connection settings come from the active provider profile in the config
+file, not env vars (see [docs/configuration.md](docs/configuration.md)):
+
+| Profile field | Description |
+|---|---|
+| `api_key` | Required. |
+| `base_url` | OpenAI-compatible endpoint (required). See [docs/self-hosting.md](docs/self-hosting.md). |
+| `model` | Model identifier sent to the backend verbatim. |
+| `context_window` | Total context window in tokens (input + output). Set to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom and never overflows. Default 180000. |
+| `max_tokens` | Per-turn output-token cap (default 8192); lower it to leave more of the window for input. |
 
 Output is the Yolium NDJSON protocol (`progress` and `complete` events), not Claude Code's `stream-json`. There is no `--output-format`, `--allowedTools`, `--dangerously-skip-permissions`, or `--verbose` flag.
 
@@ -171,22 +174,22 @@ overrides user overrides built-in. See [docs/skills.md](docs/skills.md).
 
 ## Providers
 
-| Provider | Required env var |
+| Provider | Configuration |
 |---|---|
-| openai-compatible (default: OpenRouter) | `YOLI_API_KEY` (endpoint override: `YOLI_BASE_URL`) |
+| openai-compatible | a provider profile: `base_url` + `api_key` (+ `model`, limits) |
 | `faux` | none (deterministic stub for tests) |
 
-Any OpenAI-compatible endpoint works — point `base_url` at a self-hosted
-vLLM server (e.g. on a RunPod GPU pod); see
-[docs/self-hosting.md](docs/self-hosting.md). Provider credentials and
-defaults can also be stored via `yoli config set` so they persist across
-shells. See [docs/configuration.md](docs/configuration.md).
+Any OpenAI-compatible endpoint works — point a profile's `base_url` at
+OpenRouter or a self-hosted vLLM server (e.g. on a RunPod GPU pod); see
+[docs/self-hosting.md](docs/self-hosting.md). All settings live in
+provider profiles in the config file, edited by hand; environment
+variables are not read. See
+[docs/configuration.md](docs/configuration.md).
 
-Multiple endpoints can be defined as named profiles under the `providers`
-key of the config file and selected with `--provider <name>` (on `chat`,
-`tui`, `run`, and `agent`), the `YOLI_PROVIDER` env var, the
-`default_provider` config key, or the `/provider` command inside the TUI.
-`yoli config providers` lists the defined profiles.
+Endpoints are named profiles under the `providers` key of the config
+file, selected with `--provider <name>` (on `chat`, `tui`, `run`, and
+`agent`), the `default_provider` config key, or the `/provider` command
+inside the TUI. `yoli config providers` lists the defined profiles.
 
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.

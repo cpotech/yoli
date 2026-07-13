@@ -1,13 +1,20 @@
 # Self-hosting a model for yoli
 
 Yoli talks to any OpenAI-compatible `/chat/completions` endpoint, so you
-can run your own model on a GPU box and point yoli at it with three
-config values:
+can run your own model on a GPU box and point yoli at it with a provider
+profile in `~/.config/yoli/config.json`:
 
-```bash
-yoli config set base_url  https://<your-endpoint>/v1
-yoli config set api_key   <your-secret>
-yoli config set default_model <exact served model name>
+```json
+{
+  "default_provider": "selfhosted",
+  "providers": {
+    "selfhosted": {
+      "base_url": "https://<your-endpoint>/v1",
+      "api_key": "<your-secret>",
+      "model": "<exact served model name>"
+    }
+  }
+}
 ```
 
 This guide walks through [RunPod](https://www.runpod.io) — cloud GPU
@@ -60,14 +67,23 @@ that answers once and stops. Two consequences:
 
    The base URL for yoli is that address plus `/v1`.
 
-4. **Point yoli at the pod:**
+4. **Point yoli at the pod** with a provider profile in
+   `~/.config/yoli/config.json`:
 
-   ```bash
-   yoli config set base_url https://<pod-id>-8000.proxy.runpod.net/v1
-   yoli config set api_key  <the --api-key secret>
-   yoli config set default_model Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
-   yoli chat "hi"
+   ```json
+   {
+     "default_provider": "runpod",
+     "providers": {
+       "runpod": {
+         "base_url": "https://<pod-id>-8000.proxy.runpod.net/v1",
+         "api_key": "<the --api-key secret>",
+         "model": "Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+       }
+     }
+   }
    ```
+
+   then `yoli chat "hi"`.
 
    The model name must match what vLLM serves exactly — yoli passes it
    through verbatim. Check with:
@@ -95,9 +111,9 @@ latency on the first request after idle.
 - **The proxy URL is publicly reachable.** Anyone who finds it can call
   your GPU. vLLM's `--api-key` flag is therefore non-optional: without
   it the endpoint is an open relay billed to your account.
-- **Treat the key like any credential.** Store it with
-  `yoli config set api_key` (written to `~/.config/yoli/config.json`)
-  rather than exporting it in shell history or committing it. Yoli
+- **Treat the key like any credential.** Store it in the provider
+  profile's `api_key` field in `~/.config/yoli/config.json` rather than
+  exporting it in shell history or committing it. Yoli
   sends it only as an `Authorization: Bearer` header over TLS.
 - **Don't expose the raw TCP port.** RunPod can also expose ports
   without the TLS proxy; that path ships your prompts and key in

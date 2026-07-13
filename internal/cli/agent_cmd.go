@@ -37,24 +37,22 @@ Flags:
                      when --yolium-mode is enabled. Defaults unset (events
                      discarded). Yolium passes fd=3.
 
-Environment:
-  AGENT_MODEL          Model slug (required)
+Environment (orchestrator plumbing — settings live in the config file):
+  AGENT_MODEL          Model slug override from the host orchestrator
   AGENT_TOOLS          Comma-separated tool whitelist (default: all)
   AGENT_PROMPT_FILE    Path to prompt file
   AGENT_PROMPT         Base64-encoded prompt text
   AGENT_GOAL           Base64-encoded goal description
-  YOLI_API_KEY         Required
-  YOLI_BASE_URL        OpenAI-compatible endpoint (required)
-  YOLI_CONTEXT_WINDOW  Total context window in tokens (input + output).
-                       Set this to your server's cap (e.g. a vLLM
-                       max_model_len of 32768) so the loop reserves output
-                       headroom instead of overflowing. Default 180000.
-  YOLI_MAX_TOKENS      Per-turn output-token cap (default 8192). Lower it
-                       to leave more of the window for input.
   YOLIUM_CAVEMAN_MODE  off | lite | full | ultra (yolium-mode only)
   YOLI_COMPLETE_GUARD  Set to "off" to disable the dirty-worktree guard
                        that rejects completion while uncommitted git
                        changes exist (yolium-mode only)
+
+Settings come from the provider profile selected via --provider or the
+"default_provider" config key: base_url, api_key, model, context_window
+(match your server's cap, e.g. a vLLM max_model_len; default 180000),
+and max_tokens (per-turn output cap, default 8192). See
+docs/configuration.md.
 `
 
 type agentFlags struct {
@@ -310,6 +308,16 @@ type agentLoopConfig struct {
 	whitelist  []string
 	repoPath   string
 	yoliumMode bool
+	// braveAPIKey credentials the WebSearch tool ("" leaves it erroring
+	// at call time).
+	braveAPIKey string
+	// providerName is the active profile, propagated to sub-agents via
+	// --provider.
+	providerName string
+	// contextWindow / maxTokens come from the active profile. Zero (in
+	// tests) falls back to the agent defaults.
+	contextWindow int
+	maxTokens     int
 	// skillList is advertised in the system prompt and served by the
 	// Skill tool. Empty means no section and no tool.
 	skillList []skills.LoadedSkill
@@ -323,8 +331,8 @@ type agentLoopConfig struct {
 	noSession       bool
 }
 
-// runAgent implements the `yoli agent` subcommand: it resolves flags, env,
-// and the OpenRouter provider, then drives the headless loop.
+// runAgent implements the `yoli agent` subcommand: it resolves flags,
+// config, and the provider, then drives the headless loop.
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	flags, err := parseAgentFlags(args)
 	if err != nil {
@@ -359,29 +367,19 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	profileName, err := selectProviderProfile(cfg, profiles, flags.Provider, stderr)
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	ApplyEnvDefaults(cfg)
-
-	if !requireAPIKey(stderr) {
 		return 1
 	}
 
 	model := resolveModel(flags.Model)
 	if model == "" {
-		// The selected profile (or flat config) may supply the model.
-		model = os.Getenv("YOLI_MODEL")
+		model = prof.Model
 	}
 	goal := readGoal()
 
-	if profileName != "" {
-		fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
-	} else {
-		fmt.Fprintf(stderr, "yoli: model=%s\n", model)
-	}
+	fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
 	preview := prompt
 	if len(preview) > 80 {
 		preview = preview[:80] + "..."
@@ -391,7 +389,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "yoli: goal=%s\n", goal)
 	}
 
-	provider, err := newProviderFromEnv("Yoli Agent")
+	provider, err := newProviderFromProfile(prof, "Yoli Agent")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -414,6 +412,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		sink = yolium.NewNDJSONSink(fdFile)
 	}
 
+	contextWindow, maxTokens := contextLimits(prof)
 	return runAgentLoop(agentLoopConfig{
 		provider:        provider,
 		model:           model,
@@ -423,6 +422,10 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		whitelist:       whitelist,
 		repoPath:        resolveRepoPath(),
 		yoliumMode:      flags.YoliumMode,
+		braveAPIKey:     cfg["BRAVE_API_KEY"],
+		providerName:    profileName,
+		contextWindow:   contextWindow,
+		maxTokens:       maxTokens,
 		skillList:       loadSkillsForPrompt(stderr),
 		eventSink:       sink,
 		sessionTarget:   firstNonEmpty(flags.Session, os.Getenv("AGENT_SESSION")),
@@ -462,12 +465,13 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	defaultToolset := tools.DefaultTools(c.repoPath)
+	defaultToolset := tools.DefaultTools(c.repoPath, c.braveAPIKey)
 	filteredTools := filterAgentTools(defaultToolset, c.whitelist)
 
 	subAgent := tools.NewSubAgentTool(tools.SubAgentOptions{
-		CLIEntry:     c.exe,
-		DefaultModel: c.model,
+		CLIEntry: c.exe,
+		Provider: c.providerName,
+		Model:    c.model,
 	})
 
 	allTools := append(filteredTools, subAgent)
@@ -561,7 +565,13 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	messages = append(messages, ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 	_, _ = sess.AppendMessage(ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 
-	contextWindow, maxTokens := resolveContextLimits(stderr)
+	contextWindow, maxTokens := c.contextWindow, c.maxTokens
+	if contextWindow <= 0 {
+		contextWindow = agent.DefaultContextBudget
+	}
+	if maxTokens <= 0 {
+		maxTokens = agent.DefaultMaxOutputTokens
+	}
 	fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(messages), contextWindow))
 
 	turn := 0

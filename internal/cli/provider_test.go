@@ -1,156 +1,105 @@
 package cli
 
 import (
-	"bytes"
-	"os"
 	"strings"
 	"testing"
+
+	"yoli/internal/agent"
 )
 
-// clearProviderEnv blanks every env var the profile machinery reads or
-// writes so tests are hermetic. t.Setenv registers restoration.
-func clearProviderEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{
-		"YOLI_PROVIDER", "YOLI_API_KEY", "YOLI_BASE_URL",
-		"YOLI_MODEL", "YOLI_CONTEXT_WINDOW", "YOLI_MAX_TOKENS",
-	} {
-		t.Setenv(key, "")
-		_ = os.Unsetenv(key)
+func TestSelectProviderProfile_FlagBeatsDefaultProvider(t *testing.T) {
+	profiles := ProviderProfiles{
+		"a": {BaseURL: "https://a/v1", APIKey: "ka"},
+		"b": {BaseURL: "https://b/v1", APIKey: "kb"},
 	}
-}
-
-func TestResolveProviderName_FlagBeatsEnvBeatsConfig(t *testing.T) {
-	clearProviderEnv(t)
-	t.Setenv("YOLI_PROVIDER", "from-env")
-	cfg := Config{"YOLI_PROVIDER": "from-file", "default_provider": "from-default"}
-	if name, explicit := resolveProviderName(cfg, "from-flag"); name != "from-flag" || !explicit {
-		t.Fatalf("flag should win: %q explicit=%v", name, explicit)
-	}
-	if name, explicit := resolveProviderName(cfg, ""); name != "from-env" || !explicit {
-		t.Fatalf("env should beat config: %q explicit=%v", name, explicit)
-	}
-}
-
-func TestResolveProviderName_FileKeysAreSoft(t *testing.T) {
-	clearProviderEnv(t)
-	cfg := Config{"YOLI_PROVIDER": "from-file", "default_provider": "from-default"}
-	if name, explicit := resolveProviderName(cfg, ""); name != "from-file" || explicit {
-		t.Fatalf("file YOLI_PROVIDER should win softly: %q explicit=%v", name, explicit)
-	}
-	if name, explicit := resolveProviderName(Config{"default_provider": "d"}, ""); name != "d" || explicit {
-		t.Fatalf("default_provider fallback: %q explicit=%v", name, explicit)
-	}
-	if name, _ := resolveProviderName(Config{}, ""); name != "" {
-		t.Fatalf("nothing set should be implicit mode: %q", name)
-	}
-}
-
-func TestApplyProfileEnvDefaults_SetsMissingAndKeepsExisting(t *testing.T) {
-	clearProviderEnv(t)
-	t.Setenv("YOLI_API_KEY", "shell-key")
-	applyProfileEnvDefaults(ProviderProfile{
-		BaseURL: "https://p/v1", APIKey: "profile-key", Model: "pm",
-		ContextWindow: 1234, MaxTokens: 55,
-	})
-	if got := os.Getenv("YOLI_API_KEY"); got != "shell-key" {
-		t.Fatalf("shell env should win: %q", got)
-	}
-	if got := os.Getenv("YOLI_BASE_URL"); got != "https://p/v1" {
-		t.Fatalf("base_url not exported: %q", got)
-	}
-	if got := os.Getenv("YOLI_MODEL"); got != "pm" {
-		t.Fatalf("model not exported: %q", got)
-	}
-	if got := os.Getenv("YOLI_CONTEXT_WINDOW"); got != "1234" {
-		t.Fatalf("context window not exported: %q", got)
-	}
-	if got := os.Getenv("YOLI_MAX_TOKENS"); got != "55" {
-		t.Fatalf("max tokens not exported: %q", got)
-	}
-}
-
-func TestSelectProviderProfile_AppliesProfileAndReturnsName(t *testing.T) {
-	clearProviderEnv(t)
-	profiles := ProviderProfiles{"runpod": {BaseURL: "https://pod/v1", APIKey: "k", Model: "m"}}
-	var warn bytes.Buffer
-	name, err := selectProviderProfile(Config{}, profiles, "runpod", &warn)
+	cfg := Config{"default_provider": "a"}
+	p, name, err := selectProviderProfile(cfg, profiles, "b")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if name != "runpod" {
-		t.Fatalf("name = %q", name)
+	if name != "b" || p.BaseURL != "https://b/v1" {
+		t.Fatalf("flag should win: name=%q p=%+v", name, p)
 	}
-	if os.Getenv("YOLI_BASE_URL") != "https://pod/v1" || os.Getenv("YOLI_API_KEY") != "k" {
-		t.Fatalf("profile fields not exported")
+	p, name, err = selectProviderProfile(cfg, profiles, "")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if name != "a" || p.BaseURL != "https://a/v1" {
+		t.Fatalf("default_provider fallback: name=%q p=%+v", name, p)
 	}
 }
 
-func TestSelectProviderProfile_ExplicitUnknownNameErrorsWithList(t *testing.T) {
-	clearProviderEnv(t)
+func TestSelectProviderProfile_IgnoresEnvironment(t *testing.T) {
+	t.Setenv("YOLI_PROVIDER", "b")
+	profiles := ProviderProfiles{
+		"a": {BaseURL: "https://a/v1", APIKey: "ka"},
+		"b": {BaseURL: "https://b/v1", APIKey: "kb"},
+	}
+	_, name, err := selectProviderProfile(Config{"default_provider": "a"}, profiles, "")
+	if err != nil || name != "a" {
+		t.Fatalf("env var must not select a provider: name=%q err=%v", name, err)
+	}
+}
+
+func TestSelectProviderProfile_NoProfilesErrors(t *testing.T) {
+	_, _, err := selectProviderProfile(Config{}, ProviderProfiles{}, "")
+	if err == nil || !strings.Contains(err.Error(), "no provider profiles defined") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestSelectProviderProfile_NoSelectionErrorsWithList(t *testing.T) {
 	profiles := ProviderProfiles{
 		"beta":  {BaseURL: "https://b/v1"},
 		"alpha": {BaseURL: "https://a/v1"},
 	}
-	_, err := selectProviderProfile(Config{}, profiles, "nope", &bytes.Buffer{})
-	if err == nil {
-		t.Fatalf("want error")
+	_, _, err := selectProviderProfile(Config{}, profiles, "")
+	if err == nil || !strings.Contains(err.Error(), "no provider selected") {
+		t.Fatalf("err = %v", err)
 	}
 	if !strings.Contains(err.Error(), "alpha, beta") {
 		t.Fatalf("error should list sorted profiles: %v", err)
 	}
 }
 
-func TestSelectProviderProfile_ExplicitNameWithNoProfilesErrors(t *testing.T) {
-	clearProviderEnv(t)
-	_, err := selectProviderProfile(Config{}, ProviderProfiles{}, "nope", &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), "no profiles defined") {
+func TestSelectProviderProfile_UnknownNameErrorsWithList(t *testing.T) {
+	profiles := ProviderProfiles{
+		"beta":  {BaseURL: "https://b/v1"},
+		"alpha": {BaseURL: "https://a/v1"},
+	}
+	_, _, err := selectProviderProfile(Config{"default_provider": "gone"}, profiles, "")
+	if err == nil || !strings.Contains(err.Error(), `unknown provider profile "gone"`) {
 		t.Fatalf("err = %v", err)
 	}
-}
-
-func TestSelectProviderProfile_DefaultUnknownNameWarnsAndFallsBack(t *testing.T) {
-	clearProviderEnv(t)
-	var warn bytes.Buffer
-	name, err := selectProviderProfile(
-		Config{"default_provider": "gone"}, ProviderProfiles{}, "", &warn)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if name != "" {
-		t.Fatalf("name = %q", name)
-	}
-	if !strings.Contains(warn.String(), "gone") {
-		t.Fatalf("warning missing: %q", warn.String())
+	if !strings.Contains(err.Error(), "alpha, beta") {
+		t.Fatalf("error should list sorted profiles: %v", err)
 	}
 }
 
-func TestSelectProviderProfile_EmptySelectionIsNoOp(t *testing.T) {
-	clearProviderEnv(t)
-	name, err := selectProviderProfile(Config{}, ProviderProfiles{}, "", &bytes.Buffer{})
-	if err != nil || name != "" {
-		t.Fatalf("name=%q err=%v", name, err)
+func TestNewProviderFromProfile_RequiresKeyAndURL(t *testing.T) {
+	if _, err := newProviderFromProfile(ProviderProfile{BaseURL: "https://a/v1"}, "T"); err == nil {
+		t.Fatalf("want error for missing api_key")
 	}
-	if os.Getenv("YOLI_BASE_URL") != "" {
-		t.Fatalf("env should be untouched")
+	if _, err := newProviderFromProfile(ProviderProfile{APIKey: "k"}, "T"); err == nil {
+		t.Fatalf("want error for missing base_url")
 	}
-}
-
-func TestNewProviderFromProfile_FallsBackToEnvForUnsetFields(t *testing.T) {
-	clearProviderEnv(t)
-	t.Setenv("YOLI_API_KEY", "env-key")
-	p, err := newProviderFromProfile(ProviderProfile{BaseURL: "https://pod/v1"}, "T")
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if p == nil {
-		t.Fatalf("nil provider")
+	p, err := newProviderFromProfile(ProviderProfile{BaseURL: "https://a/v1", APIKey: "k"}, "T")
+	if err != nil || p == nil {
+		t.Fatalf("complete profile should build: p=%v err=%v", p, err)
 	}
 }
 
-func TestNewProviderFromProfile_MissingEverythingErrors(t *testing.T) {
-	clearProviderEnv(t)
-	if _, err := newProviderFromProfile(ProviderProfile{}, "T"); err == nil {
-		t.Fatalf("want error for empty profile with empty env")
+func TestContextLimits_ProfileValuesAndDefaults(t *testing.T) {
+	w, m := contextLimits(ProviderProfile{ContextWindow: 32768, MaxTokens: 4096})
+	if w != 32768 || m != 4096 {
+		t.Fatalf("w/m = %d/%d, want 32768/4096", w, m)
+	}
+	w, m = contextLimits(ProviderProfile{})
+	if w != agent.DefaultContextBudget || m != agent.DefaultMaxOutputTokens {
+		t.Fatalf("w/m = %d/%d, want defaults", w, m)
+	}
+	w, m = contextLimits(ProviderProfile{ContextWindow: -1, MaxTokens: -1})
+	if w != agent.DefaultContextBudget || m != agent.DefaultMaxOutputTokens {
+		t.Fatalf("non-positive values should fall back to defaults: %d/%d", w, m)
 	}
 }

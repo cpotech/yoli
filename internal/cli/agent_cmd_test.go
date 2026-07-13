@@ -40,12 +40,12 @@ func TestAgent_NoPromptSourcePrintsUsage(t *testing.T) {
 	}
 }
 
-func TestAgent_MissingAPIKeyErrors(t *testing.T) {
+func TestAgent_MissingProviderErrors(t *testing.T) {
 	r := runCli(t, []string{"agent", "--prompt", "hi"}, runOpts{})
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "YOLI_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -89,7 +89,7 @@ func TestAgent_UsageListsAgentSubcommand(t *testing.T) {
 // --- filterAgentTools ---
 
 func TestFilterAgentTools_NilWhitelistReturnsAll(t *testing.T) {
-	ts := tools.DefaultTools("/tmp")
+	ts := tools.DefaultTools("/tmp", "")
 	got := filterAgentTools(ts, nil)
 	if len(got) != len(ts) {
 		t.Fatalf("len = %d, want %d", len(got), len(ts))
@@ -97,7 +97,7 @@ func TestFilterAgentTools_NilWhitelistReturnsAll(t *testing.T) {
 }
 
 func TestFilterAgentTools_EmptyWhitelistReturnsAll(t *testing.T) {
-	ts := tools.DefaultTools("/tmp")
+	ts := tools.DefaultTools("/tmp", "")
 	got := filterAgentTools(ts, []string{})
 	if len(got) != len(ts) {
 		t.Fatalf("len = %d, want %d", len(got), len(ts))
@@ -105,7 +105,7 @@ func TestFilterAgentTools_EmptyWhitelistReturnsAll(t *testing.T) {
 }
 
 func TestFilterAgentTools_KeepsWhitelistedOnly(t *testing.T) {
-	ts := tools.DefaultTools("/tmp")
+	ts := tools.DefaultTools("/tmp", "")
 	got := filterAgentTools(ts, []string{"Read", "Bash"})
 	if len(got) != 2 {
 		t.Fatalf("len = %d, want 2", len(got))
@@ -119,7 +119,7 @@ func TestFilterAgentTools_KeepsWhitelistedOnly(t *testing.T) {
 }
 
 func TestFilterAgentTools_IgnoresUnknownNames(t *testing.T) {
-	ts := tools.DefaultTools("/tmp")
+	ts := tools.DefaultTools("/tmp", "")
 	got := filterAgentTools(ts, []string{"Read", "nonexistent_tool"})
 	if len(got) != 1 || got[0].Definition().Name != "Read" {
 		t.Fatalf("got %d tools, want 1 (Read)", len(got))

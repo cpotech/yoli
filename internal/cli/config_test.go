@@ -87,9 +87,6 @@ func TestReadConfigFile_MalformedReturnsParseError(t *testing.T) {
 func TestLoadConfig_EmptyWhenNothingSet(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	t.Setenv("YOLI_API_KEY", "")
-	t.Setenv("YOLI_BASE_URL", "")
-	t.Setenv("YOLI_MODEL", "")
 	cfg, err := LoadConfig(LoadOptions{
 		PathOptions: PathOptions{Home: home, XDGConfigHome: ""},
 		Cwd:         cwd,
@@ -103,20 +100,19 @@ func TestLoadConfig_EmptyWhenNothingSet(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_EnvBeatsProjectBeatsUserBeatsDefault(t *testing.T) {
+func TestLoadConfig_ProjectBeatsUserBeatsDefault(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	writeFile(t, filepath.Join(cwd, ".yolirc.json"),
-		`{"default_provider":"faux","default_model":"project-model"}`)
+		`{"default_provider":"faux","BRAVE_API_KEY":"project-brave"}`)
 	if err := SetConfigValue("default_provider", "openrouter",
 		PathOptions{Home: home, XDGConfigHome: ""}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if err := SetConfigValue("YOLI_MODEL", "user-model",
+	if err := SetConfigValue("BRAVE_API_KEY", "user-brave",
 		PathOptions{Home: home, XDGConfigHome: ""}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	t.Setenv("YOLI_API_KEY", "env-key")
 	cfg, err := LoadConfig(LoadOptions{
 		PathOptions: PathOptions{Home: home, XDGConfigHome: ""},
 		Cwd:         cwd,
@@ -125,24 +121,28 @@ func TestLoadConfig_EnvBeatsProjectBeatsUserBeatsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if cfg["YOLI_API_KEY"] != "env-key" {
-		t.Fatalf("env should win: %q", cfg["YOLI_API_KEY"])
-	}
 	if cfg["default_provider"] != "faux" {
 		t.Fatalf("project should win: %q", cfg["default_provider"])
 	}
-	if cfg["YOLI_MODEL"] != "project-model" {
-		t.Fatalf("project should beat user: %q", cfg["YOLI_MODEL"])
+	if cfg["BRAVE_API_KEY"] != "project-brave" {
+		t.Fatalf("project should beat user: %q", cfg["BRAVE_API_KEY"])
 	}
 }
 
-func TestApplyEnvDefaults_NeverOverwritesAndSetsMissing(t *testing.T) {
-	t.Setenv("YOLI_API_KEY", "shell-key")
-	ApplyEnvDefaults(Config{
-		"YOLI_API_KEY": "config-key",
+func TestLoadConfig_IgnoresEnvironment(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	t.Setenv("BRAVE_API_KEY", "env-key")
+	cfg, err := LoadConfig(LoadOptions{
+		PathOptions: PathOptions{Home: home, XDGConfigHome: ""},
+		Cwd:         cwd,
+		Warnings:    &bytes.Buffer{},
 	})
-	if got := os.Getenv("YOLI_API_KEY"); got != "shell-key" {
-		t.Fatalf("YOLI_API_KEY = %q", got)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got := cfg["BRAVE_API_KEY"]; got != "" {
+		t.Fatalf("env var must not reach config, got %q", got)
 	}
 }
 
@@ -209,11 +209,11 @@ func TestLoadConfig_WarnsOnUnknownKeys(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_HintsRenamedOpenRouterAPIKey(t *testing.T) {
+func TestLoadConfig_HintsProfileOnlyKeys(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	writeFile(t, filepath.Join(cwd, ".yolirc.json"),
-		`{"openrouter_api_key":"stale-key"}`)
+		`{"YOLI_API_KEY":"stale-key","base_url":"https://stale/v1"}`)
 	var warns bytes.Buffer
 	cfg, err := LoadConfig(LoadOptions{
 		PathOptions: PathOptions{Home: home},
@@ -223,28 +223,27 @@ func TestLoadConfig_HintsRenamedOpenRouterAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if _, ok := cfg["openrouter_api_key"]; ok {
-		t.Fatalf("retired key should be dropped: %+v", cfg)
-	}
-	if cfg["YOLI_API_KEY"] != "stale-key" {
-		t.Fatalf("value should be auto-migrated to YOLI_API_KEY: %+v", cfg)
+	if len(cfg) != 0 {
+		t.Fatalf("retired keys should be dropped: %+v", cfg)
 	}
 	w := warns.String()
-	if !strings.Contains(w, "openrouter_api_key") ||
-		!strings.Contains(w, "YOLI_API_KEY") {
-		t.Fatalf("warnings = %q, want rename hint", w)
+	if !strings.Contains(w, "YOLI_API_KEY") || !strings.Contains(w, `"api_key"`) {
+		t.Fatalf("warnings = %q, want provider-profile hint for YOLI_API_KEY", w)
+	}
+	if !strings.Contains(w, `"base_url"`) {
+		t.Fatalf("warnings = %q, want provider-profile hint for base_url", w)
 	}
 }
 
 func TestGetEffectiveConfig_AnnotatesSources(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	if err := SetConfigValue("YOLI_MODEL", "user-model",
+	if err := SetConfigValue("BRAVE_API_KEY", "user-brave",
 		PathOptions{Home: home, XDGConfigHome: ""}); err != nil {
 		t.Fatalf("set: %v", err)
 	}
 	writeFile(t, filepath.Join(cwd, ".yolirc.json"), `{"default_provider":"faux"}`)
-	t.Setenv("YOLI_API_KEY", "env-key")
+	t.Setenv("BRAVE_API_KEY", "env-key")
 	entries, err := GetEffectiveConfig(LoadOptions{
 		PathOptions: PathOptions{Home: home, XDGConfigHome: ""},
 		Cwd:         cwd,
@@ -257,14 +256,11 @@ func TestGetEffectiveConfig_AnnotatesSources(t *testing.T) {
 	for _, e := range entries {
 		byKey[e.Key] = e
 	}
-	if byKey["YOLI_MODEL"].Source != SourceUser || byKey["YOLI_MODEL"].Value != "user-model" {
-		t.Fatalf("YOLI_MODEL: %+v", byKey["YOLI_MODEL"])
+	if byKey["BRAVE_API_KEY"].Source != SourceUser || byKey["BRAVE_API_KEY"].Value != "user-brave" {
+		t.Fatalf("BRAVE_API_KEY: %+v", byKey["BRAVE_API_KEY"])
 	}
 	if byKey["default_provider"].Source != SourceProject || byKey["default_provider"].Value != "faux" {
 		t.Fatalf("default_provider: %+v", byKey["default_provider"])
-	}
-	if byKey["YOLI_API_KEY"].Source != SourceEnv || byKey["YOLI_API_KEY"].Value != "env-key" {
-		t.Fatalf("YOLI_API_KEY: %+v", byKey["YOLI_API_KEY"])
 	}
 }
 
@@ -279,116 +275,31 @@ func TestIsConfigKey(t *testing.T) {
 
 func TestConfigKeys_OnlyContainsExpectedKeys(t *testing.T) {
 	want := []string{
-		"YOLI_PROVIDER",
 		"default_provider",
-		"YOLI_MODEL",
-		"default_role",
-		"YOLI_BASE_URL",
-		"YOLI_API_KEY",
 		"BRAVE_API_KEY",
-		"subagent_max_depth",
-		"YOLI_CONTEXT_WINDOW",
-		"YOLI_MAX_TOKENS",
 	}
 	if !reflect.DeepEqual(ConfigKeys, want) {
 		t.Fatalf("ConfigKeys mismatch:\n got: %v\nwant: %v", ConfigKeys, want)
 	}
 }
 
-func TestConfigKeys_ContainsBraveAPIKey(t *testing.T) {
-	if !IsConfigKey("BRAVE_API_KEY") {
-		t.Fatalf("BRAVE_API_KEY should be a known config key")
-	}
-}
-
-func TestConfigKeys_ContainsContextLimitKeys(t *testing.T) {
-	if !IsConfigKey("YOLI_CONTEXT_WINDOW") {
-		t.Fatalf("YOLI_CONTEXT_WINDOW should be a known config key")
-	}
-	if !IsConfigKey("YOLI_MAX_TOKENS") {
-		t.Fatalf("YOLI_MAX_TOKENS should be a known config key")
-	}
-}
-
-func TestSetConfigValue_ContextWindowRoundTrips(t *testing.T) {
-	home := t.TempDir()
-	opts := PathOptions{Home: home}
-	if err := SetConfigValue("YOLI_CONTEXT_WINDOW", "32768", opts); err != nil {
-		t.Fatalf("set: %v", err)
-	}
-	cfg, err := ReadConfigFile(ConfigPath(opts))
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if cfg["YOLI_CONTEXT_WINDOW"] != "32768" {
-		t.Fatalf("YOLI_CONTEXT_WINDOW = %q, want 32768", cfg["YOLI_CONTEXT_WINDOW"])
-	}
-}
-
-func TestGetEffectiveConfig_ContextLimitSources(t *testing.T) {
+func TestConfigKeys_YoliProviderMigratesToDefaultProvider(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
-	t.Setenv("YOLI_CONTEXT_WINDOW", "")
-	t.Setenv("YOLI_MAX_TOKENS", "4096")
-	writeFile(t, filepath.Join(cwd, ".yolirc.json"),
-		`{"YOLI_CONTEXT_WINDOW": "32768"}`)
-
-	entries, err := GetEffectiveConfig(LoadOptions{
-		PathOptions: PathOptions{Home: home},
-		Cwd:         cwd,
-	})
-	if err != nil {
-		t.Fatalf("effective: %v", err)
-	}
-	byKey := map[string]EffectiveEntry{}
-	for _, e := range entries {
-		byKey[e.Key] = e
-	}
-	if byKey["YOLI_CONTEXT_WINDOW"].Source != SourceProject || byKey["YOLI_CONTEXT_WINDOW"].Value != "32768" {
-		t.Fatalf("YOLI_CONTEXT_WINDOW: %+v", byKey["YOLI_CONTEXT_WINDOW"])
-	}
-	if byKey["YOLI_MAX_TOKENS"].Source != SourceEnv || byKey["YOLI_MAX_TOKENS"].Value != "4096" {
-		t.Fatalf("YOLI_MAX_TOKENS: %+v", byKey["YOLI_MAX_TOKENS"])
-	}
-}
-
-func TestApplyEnvDefaults_ExportsBraveAPIKeyWithoutOverwrite(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "")
-	ApplyEnvDefaults(Config{"BRAVE_API_KEY": "from-config"})
-	if got := os.Getenv("BRAVE_API_KEY"); got != "from-config" {
-		t.Fatalf("BRAVE_API_KEY = %q, want from-config", got)
-	}
-
-	t.Setenv("BRAVE_API_KEY", "from-shell")
-	ApplyEnvDefaults(Config{"BRAVE_API_KEY": "from-config"})
-	if got := os.Getenv("BRAVE_API_KEY"); got != "from-shell" {
-		t.Fatalf("BRAVE_API_KEY overwritten to %q", got)
-	}
-}
-
-func TestGetEffectiveConfig_BraveAPIKeyEnvSource(t *testing.T) {
-	home := t.TempDir()
-	cwd := t.TempDir()
-	t.Setenv("YOLI_API_KEY", "")
-	t.Setenv("BRAVE_API_KEY", "env-brave")
-	entries, err := GetEffectiveConfig(LoadOptions{
+	writeFile(t, filepath.Join(cwd, ".yolirc.json"), `{"YOLI_PROVIDER":"openrouter"}`)
+	var warnings bytes.Buffer
+	cfg, err := LoadConfig(LoadOptions{
 		PathOptions: PathOptions{Home: home, XDGConfigHome: ""},
 		Cwd:         cwd,
-		Warnings:    &bytes.Buffer{},
+		Warnings:    &warnings,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	var found bool
-	for _, e := range entries {
-		if e.Key == "BRAVE_API_KEY" {
-			found = true
-			if e.Source != SourceEnv || e.Value != "env-brave" {
-				t.Fatalf("BRAVE_API_KEY: %+v", e)
-			}
-		}
+	if cfg["default_provider"] != "openrouter" {
+		t.Fatalf("YOLI_PROVIDER should migrate to default_provider: %+v", cfg)
 	}
-	if !found {
-		t.Fatalf("BRAVE_API_KEY missing from effective config")
+	if !strings.Contains(warnings.String(), "renamed") {
+		t.Fatalf("expected rename warning, got: %q", warnings.String())
 	}
 }

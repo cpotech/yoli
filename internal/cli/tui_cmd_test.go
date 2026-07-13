@@ -125,7 +125,7 @@ func TestTUI_ToolCallAndResultRendered(t *testing.T) {
 		{Content: strptr("done")},
 	})
 	c := newTUITestConfig(faux)
-	c.tools = tools.DefaultTools(t.TempDir())
+	c.tools = tools.DefaultTools(t.TempDir(), "")
 	code, stdout, _ := runTUITest(t, c, "list go files\n/exit\n")
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
@@ -280,7 +280,7 @@ func TestTUI_ProviderCommandListsProfilesWithoutAPIKeys(t *testing.T) {
 	if !strings.Contains(stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
 		t.Fatalf("runpod line missing star: %q", stdout)
 	}
-	if !strings.Contains(stdout, "openrouter: base_url=https://or/v1 model=(inherited)") {
+	if !strings.Contains(stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
 		t.Fatalf("openrouter line missing: %q", stdout)
 	}
 	if strings.Contains(stdout, "sekret") {

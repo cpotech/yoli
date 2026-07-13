@@ -98,39 +98,24 @@ func jsonChoicesResponse(w http.ResponseWriter, payload any) {
 // --- constructor ---
 
 func TestNewOpenAICompatProvider_MissingAPIKey(t *testing.T) {
-	t.Setenv("YOLI_API_KEY", "")
 	_, err := NewOpenAICompatProvider(OpenAICompatOptions{BaseURL: "http://localhost"})
-	if err == nil || !strings.Contains(err.Error(), "YOLI_API_KEY") {
-		t.Fatalf("err = %v, want one mentioning YOLI_API_KEY", err)
+	if err == nil || !strings.Contains(err.Error(), "api_key") {
+		t.Fatalf("err = %v, want one mentioning api_key", err)
 	}
 }
 
 func TestNewOpenAICompatProvider_MissingBaseURL(t *testing.T) {
-	t.Setenv("YOLI_API_KEY", "k")
-	_, err := NewOpenAICompatProvider(OpenAICompatOptions{})
-	if err == nil || !strings.Contains(err.Error(), "YOLI_BASE_URL") {
-		t.Fatalf("err = %v, want one mentioning YOLI_BASE_URL", err)
+	_, err := NewOpenAICompatProvider(OpenAICompatOptions{APIKey: "k"})
+	if err == nil || !strings.Contains(err.Error(), "base_url") {
+		t.Fatalf("err = %v, want one mentioning base_url", err)
 	}
 }
 
-func TestNewOpenAICompatProvider_ReadsAPIKeyFromEnv(t *testing.T) {
+func TestNewOpenAICompatProvider_IgnoresEnvAPIKey(t *testing.T) {
 	t.Setenv("YOLI_API_KEY", "env-key")
-	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
-		jsonChoicesResponse(w, map[string]any{
-			"choices": []any{
-				map[string]any{"message": map[string]any{"role": "assistant", "content": ""}},
-			},
-		})
-	})
-	p, err := NewOpenAICompatProvider(OpenAICompatOptions{BaseURL: srv.URL})
-	if err != nil {
-		t.Fatalf("ctor: %v", err)
-	}
-	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
-		t.Fatalf("Chat: %v", err)
-	}
-	if got := rec.Headers.Get("Authorization"); got != "Bearer env-key" {
-		t.Fatalf("Authorization = %q, want %q", got, "Bearer env-key")
+	_, err := NewOpenAICompatProvider(OpenAICompatOptions{BaseURL: "http://localhost"})
+	if err == nil || !strings.Contains(err.Error(), "api_key") {
+		t.Fatalf("env var must not satisfy the API key requirement, got err = %v", err)
 	}
 }
 
@@ -432,8 +417,8 @@ func TestChat_ContextOverflowErrorIncludesHint(t *testing.T) {
 	})
 	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
 	_, err := p.Chat(context.Background(), userReq("x"))
-	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
-		t.Fatalf("err = %v, want one mentioning YOLI_CONTEXT_WINDOW hint", err)
+	if err == nil || !strings.Contains(err.Error(), "context_window") {
+		t.Fatalf("err = %v, want one mentioning context_window hint", err)
 	}
 	var overflow *ai.ContextOverflowError
 	if !errors.As(err, &overflow) {
@@ -452,8 +437,8 @@ func TestChat_ContextOverflowHintMatchesMaxModelLen(t *testing.T) {
 	})
 	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
 	_, err := p.Chat(context.Background(), userReq("x"))
-	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
-		t.Fatalf("err = %v, want YOLI_CONTEXT_WINDOW hint", err)
+	if err == nil || !strings.Contains(err.Error(), "context_window") {
+		t.Fatalf("err = %v, want context_window hint", err)
 	}
 }
 
@@ -467,7 +452,7 @@ func TestChat_UnrelatedErrorHasNoHint(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
+	if strings.Contains(err.Error(), "context_window") {
 		t.Fatalf("unrelated error should not carry the hint: %v", err)
 	}
 	var overflow *ai.ContextOverflowError
@@ -483,8 +468,8 @@ func TestChatStream_ContextOverflowErrorIncludesHint(t *testing.T) {
 	})
 	p := newProvider(t, srv, OpenAICompatOptions{APIKey: "k"})
 	_, err := p.ChatStream(context.Background(), userReq("x"))
-	if err == nil || !strings.Contains(err.Error(), "YOLI_CONTEXT_WINDOW") {
-		t.Fatalf("err = %v, want one mentioning YOLI_CONTEXT_WINDOW hint", err)
+	if err == nil || !strings.Contains(err.Error(), "context_window") {
+		t.Fatalf("err = %v, want one mentioning context_window hint", err)
 	}
 }
 
