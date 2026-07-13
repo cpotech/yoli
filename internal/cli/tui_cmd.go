@@ -26,6 +26,7 @@ const tuiUsage = "Usage: yoli tui [--loglevel debug|info|error|none] [session op
 const (
 	ansiDim   = "\x1b[2m"
 	ansiRed   = "\x1b[31m"
+	ansiGreen = "\x1b[32m"
 	ansiReset = "\x1b[0m"
 )
 
@@ -203,6 +204,10 @@ type tuiLineEditor struct {
 	cursor  int           // cursor position within prompt (0 = beginning)
 	curRow  int           // visual row of the cursor within the rendered buffer
 	prefix  string        // prompt prefix rendered before the first row
+	// color paints the typed buffer green so the user's own comments
+	// stand out from assistant/tool output in the scrollback. Gated on
+	// stderr (where the editor echoes) being a color terminal.
+	color bool
 	// onShiftTab, when non-nil, fires on Shift-Tab (CSI Z) and returns
 	// the new prompt prefix; the in-progress input is preserved.
 	onShiftTab func() string
@@ -481,9 +486,9 @@ func (e *tuiLineEditor) redrawLine() {
 	lines := strings.Split(e.prompt, "\n")
 	for i, ln := range lines {
 		if i == 0 {
-			e.stdout.WriteString(e.prefix + ln)
+			e.stdout.WriteString(e.prefix + tuiPaint(ln, ansiGreen, e.color))
 		} else {
-			e.stdout.WriteString("\r\n" + ln)
+			e.stdout.WriteString("\r\n" + tuiPaint(ln, ansiGreen, e.color))
 		}
 	}
 
@@ -611,6 +616,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 	var editor *tuiLineEditor
 	if c.interactive && tuiIsTerminal(os.Stdin) {
 		editor = newTUILineEditor(os.Stdin, stderr)
+		editor.color = tuiColorEnabled(os.Stderr)
 	}
 	if editor != nil {
 		editor.onShiftTab = func() string {

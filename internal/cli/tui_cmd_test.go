@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -167,6 +168,30 @@ func TestTUI_NoANSIWhenColorDisabled(t *testing.T) {
 	}
 	if strings.Contains(stdout, "\x1b[") || strings.Contains(stderr, "\x1b[") {
 		t.Fatalf("ANSI escapes in non-color output: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestTUIEditor_UserInputGreenWhenColorEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	e := &tuiLineEditor{stdout: bufio.NewWriter(&buf), prefix: "> ", color: true, prompt: "hello", cursor: 5}
+	e.redrawLine()
+	if !strings.Contains(buf.String(), ansiGreen) {
+		t.Fatalf("no green ANSI marker for user input: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Fatalf("missing user input text: %q", buf.String())
+	}
+}
+
+func TestTUIEditor_UserInputPlainWhenColorDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	e := &tuiLineEditor{stdout: bufio.NewWriter(&buf), prefix: "> ", color: false, prompt: "hello", cursor: 5}
+	e.redrawLine()
+	if strings.Contains(buf.String(), ansiGreen) {
+		t.Fatalf("unexpected green ANSI marker with color off: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Fatalf("missing user input text: %q", buf.String())
 	}
 }
 
