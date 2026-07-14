@@ -39,47 +39,6 @@ go install ./cmd/yoli
 # yoli is now available at $(go env GOBIN || echo $(go env GOPATH)/bin)/yoli
 ```
 
-## Running in a container (recommended)
-
-Coding agents are not security boundaries. They can be vulnerable to prompt injection, may hallucinate or produce incorrect outputs, 
-and can occasionally perform unintended actions (such as destructive commands or unexpected network requests). Running Yoli in a container 
-is strongly recommended to isolate execution and protect your host system from both malicious inputs and accidental mistakes.
-
-### Quick way: the wrapper script
-
-[`scripts/yoli-docker.sh`](scripts/yoli-docker.sh) builds the image on first
-use and runs yoli with the current directory mounted. Arguments pass straight
-through to yoli:
-
-```bash
-scripts/yoli-docker.sh       # interactive tui
-FORCE_BUILD=1 scripts/yoli-docker.sh ... # rebuild the image first
-```
-
-Credentials come from your host config at `~/.config/yoli/config.json`,
-which the script mounts read-only so yoli reads the provider profiles
-itself — yoli does not read settings from the environment. Define a
-profile once and the container picks it up. See
-[docs/configuration.md](docs/configuration.md).
-
-### Locking down the network (firewall)
-
-Yoli needs the network to reach the model. The firewall mode applies a smarter
-policy: **outbound internet is allowed; your LAN, router, and cloud metadata
-endpoints are blocked; no inbound access.** Just add `FIREWALL=1` to the
-wrapper script:
-
-```bash
-FIREWALL=1 scripts/yoli-docker.sh             # interactive tui
-FIREWALL=1 scripts/yoli-docker.sh chat "hi"   # one-shot chat
-```
-
-Under the hood this runs [`docker-compose.egress.yml`](docker-compose.egress.yml):
-a sidecar owns a network namespace and installs iptables rules
-([`deploy/egress-firewall.sh`](deploy/egress-firewall.sh)) that the yoli
-container joins, so the rules cover every protocol, not just HTTP. Edit those
-rules to tighten the policy.
-
 ## Layout
 
 ```
@@ -213,7 +172,6 @@ reported by `yoli version`. The version comes from `git describe --tags
 The version is applied consistently across build paths:
 
 - **Host build** — `scripts/build.sh` (honors `GOOS`/`GOARCH`, `OUTPUT`, `YOLI_VERSION`).
-- **Docker** — `Dockerfile` and `docker-compose.egress.yml` inject the version via a `YOLI_VERSION` build arg, so containerized `yoli version` is not just `dev`. `scripts/yoli-docker.sh` passes the host's git-derived version through automatically.
 - **Releases** — `scripts/release.sh <version>` (e.g. `v0.2.0`) creates an annotated git tag and cross-compiles versioned binaries into `dist/` (`yoli-<os>-<arch>` for linux/darwin × amd64/arm64), rebuilding the root `yoli` with the same version. Push the tag with `git push origin <version>` to publish.
 
 ## Docs

@@ -118,10 +118,6 @@ latency on the first request after idle.
 - **Don't expose the raw TCP port.** RunPod can also expose ports
   without the TLS proxy; that path ships your prompts and key in
   plaintext. Stick to the `https://…proxy.runpod.net` address.
-- **The container firewall still applies.** `FIREWALL=1
-  scripts/yoli-docker.sh` works unchanged with a self-hosted endpoint:
-  the RunPod proxy is public internet, which the egress policy allows,
-  while your LAN and cloud metadata stay blocked.
 - **Stop the pod when done.** Idle pods bill by the hour and remain
   reachable; serverless endpoints scale to zero on their own.
 
