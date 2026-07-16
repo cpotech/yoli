@@ -16,6 +16,7 @@ Commands:
   agent                Run the headless agent loop (Yolium protocol)
   session <list|...>   Inspect or operate on session files
   skills <list|show>   Inspect skills available to the agent
+  provider <list>      List the provider profiles you have configured
   config <get|set|...> Inspect or modify yoli configuration
 
 chat, tui, run, and agent accept --provider <name> to select a provider
@@ -107,6 +108,8 @@ done:
 		return runSession(rest, stdout, stderr)
 	case "skills":
 		return runSkills(rest, stdout, stderr)
+	case "provider":
+		return runProvider(rest, stdout, stderr)
 	case "config":
 		return runConfig(rest, stdout, stderr)
 	default:

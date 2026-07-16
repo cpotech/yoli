@@ -645,6 +645,60 @@ func TestConfig_ProvidersEmptyPrintsPlaceholder(t *testing.T) {
 	}
 }
 
+func TestProvider_ListShowsProfilesWithoutAPIKeys(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"default_provider": "runpod",
+		"providers": {
+			"runpod": {"base_url":"https://pod/v1","api_key":"sekret-pod","model":"m1"},
+			"openrouter": {"base_url":"https://or/v1","api_key":"sekret-or"}
+		}
+	}`)
+	r := runCli(t, []string{"provider", "list"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("missing active runpod line: %q", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
+		t.Fatalf("missing openrouter line: %q", r.stdout)
+	}
+	if strings.Contains(r.stdout, "sekret") {
+		t.Fatalf("api key leaked to stdout: %q", r.stdout)
+	}
+}
+
+func TestProvider_ListEmptyPrintsPlaceholder(t *testing.T) {
+	r := runCli(t, []string{"provider", "list"}, runOpts{})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "(no provider profiles defined)") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestProvider_NoSubPrintsUsage(t *testing.T) {
+	r := runCli(t, []string{"provider"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("want non-zero exit on missing subcommand, got 0")
+	}
+	if !strings.Contains(r.stderr, "Usage: yoli provider") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+func TestProvider_UnknownSubPrintsUsage(t *testing.T) {
+	r := runCli(t, []string{"provider", "bogus"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("want non-zero exit on unknown subcommand, got 0")
+	}
+	if !strings.Contains(r.stderr, "Unknown provider subcommand") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
 func TestConfig_SetPreservesProvidersObject(t *testing.T) {
 	home := t.TempDir()
 	writeUserConfig(t, home, `{

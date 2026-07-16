@@ -1,0 +1,32 @@
+# Sandbox template image for running yoli inside Docker Sandboxes (sbx).
+#
+# Builds a static yoli binary, then layers it onto the official `shell`
+# sandbox template so `sbx run shell -t yoli:sbx` (see scripts/sbx.sh) has
+# `yoli` on PATH inside the microVM. The base template provides the isolated
+# filesystem/network, a non-root `agent` user, and the shell agent runtime;
+# we only add the binary.
+#
+# Built by scripts/sbx.sh; not used directly. Pass the version string with
+# `docker build --build-arg YOLI_VERSION=...` to stamp `yoli version`.
+
+# --- build stage: compile a self-contained static binary --------------------
+FROM golang:1.23 AS build
+WORKDIR /src
+
+# Cache module downloads separately from source changes.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# CGO_ENABLED=0 yields a static binary; the version is stamped into
+# yoli/internal/cli.Version via -ldflags, matching scripts/build.sh.
+ARG YOLI_VERSION=""
+RUN CGO_ENABLED=0 go build \
+      -ldflags="-s -w -X yoli/internal/cli.Version=${YOLI_VERSION}" \
+      -o /out/yoli ./cmd/yoli
+
+# --- runtime stage: the shell sandbox template + yoli -----------------------
+# Keep the base template's USER (agent), WORKDIR, and entrypoint intact so the
+# `shell` agent still launches as sbx expects; just drop the binary on PATH.
+FROM docker/sandbox-templates:shell
+COPY --from=build /out/yoli /usr/local/bin/yoli

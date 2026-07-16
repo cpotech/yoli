@@ -39,6 +39,21 @@ go install ./cmd/yoli
 # yoli is now available at $(go env GOBIN || echo $(go env GOPATH)/bin)/yoli
 ```
 
+## Run in a sandbox
+
+The agent's `Bash` tool runs arbitrary commands, so you may want to isolate it
+from your host. yoli ships a [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)
+**kit** that runs the agent in a microVM (its own filesystem and network) against
+the current repository. `scripts/sbx.sh` is the one-command entry point:
+
+```bash
+scripts/sbx.sh              # yoli TUI in a sandbox on the current directory
+```
+
+Your **API keys never enter the sandbox**: yoli gets a placeholder config and the
+host-side proxy swaps in the real key on egress. Requires the `sbx` CLI. See
+[docs/sandbox.md](docs/sandbox.md) for setup, credential handling, and testing.
+
 ## Layout
 
 ```

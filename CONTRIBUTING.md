@@ -1,7 +1,5 @@
 # Contributing to yoli
 
-Test
-
 Thanks for your interest in contributing! yoli is a small, provider-agnostic
 coding-agent CLI written in Go. This guide covers how to get set up, the
 expectations for changes, and how to submit them.
