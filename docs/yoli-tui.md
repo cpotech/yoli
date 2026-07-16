@@ -25,12 +25,19 @@ Run `yoli tui` to start an interactive REPL session with the following features:
   - **Ctrl-D**: Exit the REPL when line is empty (or Ctrl-D at EOF)
   - **Enter**: Submit the prompt
 
+- **Skill Cycling (Shift-Tab)**: Cycle the active skill through
+  none → first skill → … → last skill → none. The prompt shows the
+  active skill (e.g. `[plan] > `), the in-progress input is preserved,
+  and the skill's full instructions are appended to the system prompt
+  for each turn while active. `/skill` does the same without a terminal.
+
 ### Slash Commands
 
 Available commands in TUI mode:
 - `/help` - Show available commands
 - `/model [slug]` - Show or switch the AI model
-- `/context` - Show estimated context size
+- `/skill [name|off]` - Show, set, or clear the active skill (Shift-Tab cycles)
+- `/context` - Show estimated context size (includes the active skill body)
 - `/clear` - Start a new session
 - `/exit`, `/quit` - Leave the REPL
 
@@ -65,6 +72,7 @@ Arrow keys send ANSI escape sequences:
 - Down: `ESC [ B`
 - Right: `ESC [ C`
 - Left: `ESC [ D`
+- Shift-Tab: `ESC [ Z` (cycles the active skill)
 
 The editor reads these sequences byte-by-byte after detecting the initial `ESC` (byte 27).
 

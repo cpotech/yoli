@@ -9,24 +9,15 @@ import (
 	"io"
 	"iter"
 	"net/http"
-	"os"
 	"strings"
 
 	"yoli/internal/ai"
 )
 
-// OpenRouterID is the canonical id string for the OpenRouter provider.
-const OpenRouterID = "openrouter"
-
-const (
-	openRouterModelPrefix    = OpenRouterID + ":"
-	openRouterDefaultBaseURL = "https://openrouter.ai/api/v1"
-)
-
-// OpenRouterOptions configures a new OpenRouterProvider. All fields are
-// optional; an empty struct is valid as long as OPENROUTER_API_KEY is set
-// in the environment.
-type OpenRouterOptions struct {
+// OpenAICompatOptions configures a new OpenAICompatProvider. APIKey and
+// BaseURL are required (sourced from the active provider profile by the
+// CLI).
+type OpenAICompatOptions struct {
 	APIKey     string
 	BaseURL    string
 	HTTPClient *http.Client
@@ -34,9 +25,9 @@ type OpenRouterOptions struct {
 	Title      string
 }
 
-// OpenRouterProvider speaks the OpenAI-compatible API exposed by
-// openrouter.ai/api/v1.
-type OpenRouterProvider struct {
+// OpenAICompatProvider speaks the OpenAI-compatible /chat/completions
+// API served by OpenRouter, vLLM, and other self-hosted backends.
+type OpenAICompatProvider struct {
 	apiKey  string
 	baseURL string
 	client  *http.Client
@@ -44,28 +35,27 @@ type OpenRouterProvider struct {
 	title   string
 }
 
-// NewOpenRouterProvider validates options and returns a ready provider.
-// Returns an error if no API key is available via opts or environment.
-func NewOpenRouterProvider(opts OpenRouterOptions) (*OpenRouterProvider, error) {
+// NewOpenAICompatProvider validates options and returns a ready provider.
+// Returns an error if no API key is supplied in opts.
+func NewOpenAICompatProvider(opts OpenAICompatOptions) (*OpenAICompatProvider, error) {
 	key := opts.APIKey
 	if key == "" {
-		key = os.Getenv("OPENROUTER_API_KEY")
-	}
-	if key == "" {
 		return nil, errors.New(
-			"OpenRouter API key missing — set the OPENROUTER_API_KEY env var or pass opts.APIKey",
+			"API key missing — set \"api_key\" in the provider profile or pass opts.APIKey",
 		)
 	}
 	baseURL := opts.BaseURL
 	if baseURL == "" {
-		baseURL = openRouterDefaultBaseURL
+		return nil, errors.New(
+			"base URL missing — set \"base_url\" in the provider profile or pass opts.BaseURL",
+		)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
 	client := opts.HTTPClient
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &OpenRouterProvider{
+	return &OpenAICompatProvider{
 		apiKey:  key,
 		baseURL: baseURL,
 		client:  client,
@@ -75,7 +65,7 @@ func NewOpenRouterProvider(opts OpenRouterOptions) (*OpenRouterProvider, error) 
 }
 
 // Chat performs a non-streaming completion.
-func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
+func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
 	resp, err := p.send(ctx, req, false)
 	if err != nil {
 		return ai.ChatResponse{}, err
@@ -84,22 +74,25 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.C
 
 	var wire wireResponse
 	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
-		return ai.ChatResponse{}, fmt.Errorf("openrouter: decode response: %w", err)
+		return ai.ChatResponse{}, fmt.Errorf("provider: decode response: %w", err)
 	}
 
 	var content *string
 	var toolCalls []ai.ToolCall
 	var usage *ai.Usage
-	if len(wire.Choices) > 0 && wire.Choices[0].Message != nil {
-		m := wire.Choices[0].Message
-		content = m.Content
-		if len(m.ToolCalls) > 0 {
-			toolCalls = make([]ai.ToolCall, len(m.ToolCalls))
-			for i, c := range m.ToolCalls {
-				toolCalls[i] = ai.ToolCall{
-					ID:        c.ID,
-					Name:      c.Function.Name,
-					Arguments: c.Function.Arguments,
+	var finishReason string
+	if len(wire.Choices) > 0 {
+		finishReason = wire.Choices[0].FinishReason
+		if m := wire.Choices[0].Message; m != nil {
+			content = m.Content
+			if len(m.ToolCalls) > 0 {
+				toolCalls = make([]ai.ToolCall, len(m.ToolCalls))
+				for i, c := range m.ToolCalls {
+					toolCalls[i] = ai.ToolCall{
+						ID:        c.ID,
+						Name:      c.Function.Name,
+						Arguments: c.Function.Arguments,
+					}
 				}
 			}
 		}
@@ -116,13 +109,18 @@ func (p *OpenRouterProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.C
 			Cost:             cost,
 		}
 	}
-	return ai.ChatResponse{Content: content, ToolCalls: toolCalls, Usage: usage}, nil
+	return ai.ChatResponse{
+		Content:      content,
+		ToolCalls:    toolCalls,
+		Usage:        usage,
+		FinishReason: finishReason,
+	}, nil
 }
 
 // ChatStream performs a streaming completion. The outer error covers
 // transport / non-2xx failures; mid-stream issues surface through the
 // iterator's error channel.
-func (p *OpenRouterProvider) ChatStream(
+func (p *OpenAICompatProvider) ChatStream(
 	ctx context.Context, req ai.ChatRequest,
 ) (iter.Seq2[ai.ChatStreamChunk, error], error) {
 	resp, err := p.send(ctx, req, true)
@@ -174,17 +172,16 @@ func (p *OpenRouterProvider) ChatStream(
 	return seq, nil
 }
 
-func (p *OpenRouterProvider) send(
+func (p *OpenAICompatProvider) send(
 	ctx context.Context, req ai.ChatRequest, stream bool,
 ) (*http.Response, error) {
-	model := strings.TrimPrefix(req.Model, openRouterModelPrefix)
-
 	wireMsgs := make([]any, len(req.Messages))
 	for i, m := range req.Messages {
 		wireMsgs[i] = toWireMessage(m)
 	}
 
-	body := wireRequest{Model: model, Messages: wireMsgs}
+	// The model id is sent to the backend verbatim.
+	body := wireRequest{Model: req.Model, Messages: wireMsgs}
 	if len(req.Tools) > 0 {
 		body.Tools = make([]wireTool, len(req.Tools))
 		for i, t := range req.Tools {
@@ -201,7 +198,7 @@ func (p *OpenRouterProvider) send(
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: marshal request: %w", err)
+		return nil, fmt.Errorf("provider: marshal request: %w", err)
 	}
 
 	httpReq, err := http.NewRequestWithContext(
@@ -210,7 +207,7 @@ func (p *OpenRouterProvider) send(
 		bytes.NewReader(bodyBytes),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: build request: %w", err)
+		return nil, fmt.Errorf("provider: build request: %w", err)
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -226,21 +223,37 @@ func (p *OpenRouterProvider) send(
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
-		return nil, fmt.Errorf("openrouter: request failed: %w", err)
+		return nil, fmt.Errorf("provider: request failed: %w", err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		text, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		msg := fmt.Sprintf(
-			"openrouter: request failed: %d %s",
+			"provider: request failed: %d %s",
 			resp.StatusCode, http.StatusText(resp.StatusCode),
 		)
 		if len(text) > 0 {
 			msg += " — " + string(text)
 		}
+		if isContextOverflow(string(text)) {
+			msg += " (hint: set \"context_window\" in the provider profile to your server's context limit)"
+			return nil, &ai.ContextOverflowError{StatusCode: resp.StatusCode, Message: msg}
+		}
 		return nil, errors.New(msg)
 	}
 	return resp, nil
+}
+
+// isContextOverflow reports whether a non-2xx response body reads like a
+// context-window overflow from an OpenAI-compatible backend (vLLM,
+// OpenRouter, …). The phrasing varies by server, so we match the common
+// substrings case-insensitively. This is the discovery path that points
+// the user at the profile's context_window field.
+func isContextOverflow(body string) bool {
+	b := strings.ToLower(body)
+	return strings.Contains(b, "context length") ||
+		strings.Contains(b, "max_model_len") ||
+		strings.Contains(b, "maximum context")
 }
 
 // --- wire types ---
@@ -271,7 +284,8 @@ type wireResponseUsage struct {
 
 type wireResponse struct {
 	Choices []struct {
-		Message *wireResponseMessage `json:"message"`
+		Message      *wireResponseMessage `json:"message"`
+		FinishReason string               `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *wireResponseUsage `json:"usage,omitempty"`
 }
@@ -356,6 +370,6 @@ func derefString(s *string) string {
 
 // Compile-time interface checks.
 var (
-	_ ai.Provider          = (*OpenRouterProvider)(nil)
-	_ ai.StreamingProvider = (*OpenRouterProvider)(nil)
+	_ ai.Provider          = (*OpenAICompatProvider)(nil)
+	_ ai.StreamingProvider = (*OpenAICompatProvider)(nil)
 )

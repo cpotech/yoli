@@ -55,7 +55,6 @@ func runCli(t *testing.T, args []string, opts runOpts) runResult {
 		"YOLI_CLI_TEST_HELPER=1",
 		"HOME=" + home,
 		"PATH=" + os.Getenv("PATH"),
-		"OPENROUTER_API_KEY=",
 	}
 	for k, v := range opts.extraEnv {
 		env = append(env, k+"="+v)
@@ -146,12 +145,12 @@ func TestCLI_UnknownSubcommandMentionsIt(t *testing.T) {
 
 // ---- tui ----
 
-func TestTUI_MissingAPIKeyErrors(t *testing.T) {
+func TestTUI_MissingProviderErrors(t *testing.T) {
 	r := runCli(t, []string{"tui"}, runOpts{})
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -180,12 +179,12 @@ func TestChat_NoPromptPrintsUsage(t *testing.T) {
 	}
 }
 
-func TestChat_MissingAPIKeyErrors(t *testing.T) {
+func TestChat_MissingProviderErrors(t *testing.T) {
 	r := runCli(t, []string{"chat", "hello"}, runOpts{})
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -200,16 +199,16 @@ func TestChat_DashPAliasMissingPrompt(t *testing.T) {
 	}
 }
 
-func TestChat_DashPAliasReachesAPIKeyCheck(t *testing.T) {
+func TestChat_DashPAliasReachesProviderCheck(t *testing.T) {
 	r := runCli(t, []string{"-p", "hello"}, runOpts{})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
 
 func TestChat_LongPromptAliasAlsoAccepted(t *testing.T) {
 	r := runCli(t, []string{"--prompt", "hello"}, runOpts{})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -217,7 +216,7 @@ func TestChat_LongPromptAliasAlsoAccepted(t *testing.T) {
 func TestChat_NoSessionSkipsSessionFileCreation(t *testing.T) {
 	home := t.TempDir()
 	r := runCli(t, []string{"chat", "--no-session", "hello"}, runOpts{home: home})
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".yoli", "agent", "sessions")); !os.IsNotExist(err) {
@@ -293,12 +292,12 @@ func TestRun_UnknownRoleListsValidOnes(t *testing.T) {
 	}
 }
 
-func TestRun_ValidRoleErrorsWithoutAPIKey(t *testing.T) {
+func TestRun_ValidRoleErrorsWithoutProvider(t *testing.T) {
 	r := runCli(t, []string{"run", "--role", "coder"}, runOpts{stdin: ""})
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -308,7 +307,7 @@ func TestRun_EqualsFormAccepted(t *testing.T) {
 	if r.exitCode == 0 {
 		t.Fatalf("exit = 0")
 	}
-	if !strings.Contains(r.stderr, "OPENROUTER_API_KEY") {
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
 		t.Fatalf("stderr = %q", r.stderr)
 	}
 }
@@ -350,12 +349,14 @@ func TestSkills_UnknownSubMentionsIt(t *testing.T) {
 	}
 }
 
-func TestSkills_ListEmptyState(t *testing.T) {
+func TestSkills_ListShowsEmbeddedBuiltIns(t *testing.T) {
+	// With no project or user skills, the embedded built-ins are still
+	// listed — they ship inside the binary, so the list is never empty.
 	r := runCli(t, []string{"skills", "list"}, runOpts{cwd: t.TempDir()})
 	if r.exitCode != 0 {
 		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
 	}
-	if !strings.Contains(r.stdout, "No skills") {
+	if !strings.Contains(r.stdout, "plan") || !strings.Contains(r.stdout, "built-in") {
 		t.Fatalf("stdout = %q", r.stdout)
 	}
 }
@@ -577,23 +578,26 @@ func TestConfig_ListProjectOverridesUser(t *testing.T) {
 	}
 }
 
-func TestConfig_ListEnvOverridesProject(t *testing.T) {
+func TestConfig_ListIgnoresEnvironment(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
 	if err := os.WriteFile(filepath.Join(cwd, ".yolirc.json"),
-		[]byte(`{"openrouter_api_key":"project-key"}`), 0o644); err != nil {
+		[]byte(`{"BRAVE_API_KEY":"project-key"}`), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	r := runCli(t, []string{"config", "list"}, runOpts{
 		home: home, cwd: cwd,
-		extraEnv: map[string]string{"OPENROUTER_API_KEY": "env-key"},
+		extraEnv: map[string]string{"BRAVE_API_KEY": "env-key"},
 	})
 	if r.exitCode != 0 {
 		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
 	}
-	re := regexp.MustCompile(`openrouter_api_key\s*=\s*env-key\s+\(env\)`)
+	re := regexp.MustCompile(`BRAVE_API_KEY\s*=\s*project-key\s+\(project\)`)
 	if !re.MatchString(r.stdout) {
-		t.Fatalf("missing env label: %q", r.stdout)
+		t.Fatalf("project value should win regardless of env: %q", r.stdout)
+	}
+	if strings.Contains(r.stdout, "env-key") {
+		t.Fatalf("env value leaked into config list: %q", r.stdout)
 	}
 }
 
@@ -604,5 +608,133 @@ func TestConfig_NoSubPrintsUsage(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(r.stderr), "usage") {
 		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+func TestConfig_ProvidersListsProfilesWithoutAPIKeys(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"default_provider": "runpod",
+		"providers": {
+			"runpod": {"base_url":"https://pod/v1","api_key":"sekret-pod","model":"m1"},
+			"openrouter": {"base_url":"https://or/v1","api_key":"sekret-or"}
+		}
+	}`)
+	r := runCli(t, []string{"config", "providers"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("missing active runpod line: %q", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
+		t.Fatalf("missing openrouter line: %q", r.stdout)
+	}
+	if strings.Contains(r.stdout, "sekret") {
+		t.Fatalf("api key leaked to stdout: %q", r.stdout)
+	}
+}
+
+func TestConfig_ProvidersEmptyPrintsPlaceholder(t *testing.T) {
+	r := runCli(t, []string{"config", "providers"}, runOpts{})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "(no provider profiles defined)") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestProvider_ListShowsProfilesWithoutAPIKeys(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"default_provider": "runpod",
+		"providers": {
+			"runpod": {"base_url":"https://pod/v1","api_key":"sekret-pod","model":"m1"},
+			"openrouter": {"base_url":"https://or/v1","api_key":"sekret-or"}
+		}
+	}`)
+	r := runCli(t, []string{"provider", "list"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("missing active runpod line: %q", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
+		t.Fatalf("missing openrouter line: %q", r.stdout)
+	}
+	if strings.Contains(r.stdout, "sekret") {
+		t.Fatalf("api key leaked to stdout: %q", r.stdout)
+	}
+}
+
+func TestProvider_ListEmptyPrintsPlaceholder(t *testing.T) {
+	r := runCli(t, []string{"provider", "list"}, runOpts{})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	if !strings.Contains(r.stdout, "(no provider profiles defined)") {
+		t.Fatalf("stdout = %q", r.stdout)
+	}
+}
+
+func TestProvider_NoSubPrintsUsage(t *testing.T) {
+	r := runCli(t, []string{"provider"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("want non-zero exit on missing subcommand, got 0")
+	}
+	if !strings.Contains(r.stderr, "Usage: yoli provider") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+func TestProvider_UnknownSubPrintsUsage(t *testing.T) {
+	r := runCli(t, []string{"provider", "bogus"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("want non-zero exit on unknown subcommand, got 0")
+	}
+	if !strings.Contains(r.stderr, "Unknown provider subcommand") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+func TestConfig_SetPreservesProvidersObject(t *testing.T) {
+	home := t.TempDir()
+	writeUserConfig(t, home, `{
+		"providers": {"runpod": {"base_url":"https://pod/v1","api_key":"k","context_window":57344}}
+	}`)
+	r := runCli(t, []string{"config", "set", "default_provider", "runpod"}, runOpts{home: home})
+	if r.exitCode != 0 {
+		t.Fatalf("exit = %d stderr=%q", r.exitCode, r.stderr)
+	}
+	body, err := os.ReadFile(filepath.Join(home, ".config", "yoli", "config.json"))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var parsed struct {
+		DefaultProvider string           `json:"default_provider"`
+		Providers       ProviderProfiles `json:"providers"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.DefaultProvider != "runpod" {
+		t.Fatalf("default_provider not set: %s", body)
+	}
+	want := ProviderProfile{BaseURL: "https://pod/v1", APIKey: "k", ContextWindow: 57344}
+	if parsed.Providers["runpod"] != want {
+		t.Fatalf("providers object mangled: %s", body)
+	}
+}
+
+func writeUserConfig(t *testing.T, home, body string) {
+	t.Helper()
+	cfgDir := filepath.Join(home, ".config", "yoli")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
 	}
 }

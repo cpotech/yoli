@@ -11,7 +11,7 @@ import (
 )
 
 func TestWebSearch_Definition(t *testing.T) {
-	tl := NewWebSearchTool()
+	tl := NewWebSearchTool("")
 	def := tl.Definition()
 	if def.Name != "WebSearch" {
 		t.Fatalf("name = %q, want WebSearch", def.Name)
@@ -53,8 +53,7 @@ func TestWebSearch_Definition(t *testing.T) {
 }
 
 func TestWebSearch_MissingAPIKey(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "")
-	tl := NewWebSearchTool()
+	tl := NewWebSearchTool("")
 	_, err := tl.Run(context.Background(), json.RawMessage(`{"query":"go"}`))
 	if err == nil {
 		t.Fatalf("want error when BRAVE_API_KEY missing")
@@ -65,8 +64,7 @@ func TestWebSearch_MissingAPIKey(t *testing.T) {
 }
 
 func TestWebSearch_InvalidJSON(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
-	tl := NewWebSearchTool()
+	tl := NewWebSearchTool("k")
 	_, err := tl.Run(context.Background(), json.RawMessage(`not-json`))
 	if err == nil {
 		t.Fatalf("want error on invalid JSON")
@@ -74,7 +72,6 @@ func TestWebSearch_InvalidJSON(t *testing.T) {
 }
 
 func TestWebSearch_SendsHeaderAndQuery(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "secret-token")
 	var gotToken, gotAccept, gotQ, gotCount string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotToken = r.Header.Get("X-Subscription-Token")
@@ -84,7 +81,7 @@ func TestWebSearch_SendsHeaderAndQuery(t *testing.T) {
 		_, _ = w.Write([]byte(`{"web":{"results":[]}}`))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "secret-token")
 	_, err := tl.Run(context.Background(), json.RawMessage(`{"query":"golang test","count":3}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -104,7 +101,6 @@ func TestWebSearch_SendsHeaderAndQuery(t *testing.T) {
 }
 
 func TestWebSearch_FormatsResults(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	body := `{"web":{"results":[
 		{"title":"Go","url":"https://go.dev","description":"The Go programming language."},
 		{"title":"Golang Blog","url":"https://go.dev/blog","description":"Updates from the team."}
@@ -113,7 +109,7 @@ func TestWebSearch_FormatsResults(t *testing.T) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	out, err := tl.Run(context.Background(), json.RawMessage(`{"query":"go"}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -129,7 +125,6 @@ func TestWebSearch_FormatsResults(t *testing.T) {
 }
 
 func TestWebSearch_TruncatesToCount(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	body := `{"web":{"results":[
 		{"title":"A","url":"https://a","description":"a"},
 		{"title":"B","url":"https://b","description":"b"},
@@ -140,7 +135,7 @@ func TestWebSearch_TruncatesToCount(t *testing.T) {
 		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	out, err := tl.Run(context.Background(), json.RawMessage(`{"query":"x","count":2}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -154,14 +149,13 @@ func TestWebSearch_TruncatesToCount(t *testing.T) {
 }
 
 func TestWebSearch_DefaultCountIsFive(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	var gotCount string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotCount = r.URL.Query().Get("count")
 		_, _ = w.Write([]byte(`{"web":{"results":[]}}`))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	_, err := tl.Run(context.Background(), json.RawMessage(`{"query":"x"}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -172,12 +166,11 @@ func TestWebSearch_DefaultCountIsFive(t *testing.T) {
 }
 
 func TestWebSearch_NoResultsMessage(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"web":{"results":[]}}`))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	out, err := tl.Run(context.Background(), json.RawMessage(`{"query":"x"}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -188,13 +181,12 @@ func TestWebSearch_NoResultsMessage(t *testing.T) {
 }
 
 func TestWebSearch_NonOKReturnsToolOutput(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":"rate limited"}`))
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	out, err := tl.Run(context.Background(), json.RawMessage(`{"query":"x"}`))
 	if err != nil {
 		t.Fatalf("non-2xx should not return Go error, got: %v", err)
@@ -208,7 +200,6 @@ func TestWebSearch_NonOKReturnsToolOutput(t *testing.T) {
 }
 
 func TestWebSearch_ContextCancellation(t *testing.T) {
-	t.Setenv("BRAVE_API_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
@@ -216,7 +207,7 @@ func TestWebSearch_ContextCancellation(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	tl := newWebSearchToolWithClient(srv.URL, srv.Client())
+	tl := newWebSearchToolWithClient(srv.URL, srv.Client(), "k")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := tl.Run(ctx, json.RawMessage(`{"query":"x"}`))

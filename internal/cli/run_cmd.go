@@ -4,37 +4,57 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"yoli/internal/agent"
-	"yoli/internal/ai/providers"
 )
 
-func parseRunFlags(args []string) (string, error) {
-	var role string
+type runFlags struct {
+	Role     string
+	Provider string
+	Model    string
+}
+
+func parseRunFlags(args []string) (runFlags, error) {
+	var f runFlags
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
 		case arg == "--role":
 			if i+1 >= len(args) {
-				return "", fmt.Errorf("--role requires a value")
+				return f, fmt.Errorf("--role requires a value")
 			}
-			role = args[i+1]
+			f.Role = args[i+1]
 			i++
 		case strings.HasPrefix(arg, "--role="):
-			role = strings.TrimPrefix(arg, "--role=")
+			f.Role = strings.TrimPrefix(arg, "--role=")
+		case arg == "--provider":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--provider requires a value")
+			}
+			f.Provider = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--provider="):
+			f.Provider = strings.TrimPrefix(arg, "--provider=")
+		case arg == "--model":
+			if i+1 >= len(args) {
+				return f, fmt.Errorf("--model requires a value")
+			}
+			f.Model = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--model="):
+			f.Model = strings.TrimPrefix(arg, "--model=")
 		default:
-			return "", fmt.Errorf("Unknown flag for run: %s", arg)
+			return f, fmt.Errorf("Unknown flag for run: %s", arg)
 		}
 	}
-	if role == "" {
-		return "", fmt.Errorf(
+	if f.Role == "" {
+		return f, fmt.Errorf(
 			"Missing required flag --role <role>. Known roles: %s",
 			strings.Join(agent.ListRoles(), ", "),
 		)
 	}
-	return role, nil
+	return f, nil
 }
 
 // runRun implements the `yoli run --role <role>` subcommand: read all
@@ -42,11 +62,12 @@ func parseRunFlags(args []string) (string, error) {
 // OpenRouter with the role's system prompt, and write the response to
 // stdout.
 func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	role, err := parseRunFlags(args)
+	flags, err := parseRunFlags(args)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	role := flags.Role
 	if _, err := agent.GetRolePrompt(role); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -59,20 +80,21 @@ func runRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = defaultModel
+	prof, _, err := selectProviderProfile(cfg, profiles, flags.Provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  os.Getenv("OPENROUTER_API_KEY"),
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli",
-	})
+	model := firstNonEmpty(flags.Model, prof.Model)
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1

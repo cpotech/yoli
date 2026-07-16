@@ -3,6 +3,8 @@ package tools
 import (
 	"encoding/json"
 	"testing"
+
+	"yoli/internal/ai"
 )
 
 func TestNormalizeArgKeys_CamelToSnake(t *testing.T) {
@@ -124,6 +126,133 @@ func TestCamelToSnake(t *testing.T) {
 		got := camelToSnake(c.in)
 		if got != c.want {
 			t.Errorf("camelToSnake(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func schemaDef(props ...string) ai.ToolDefinition {
+	p := map[string]any{}
+	for _, name := range props {
+		p[name] = map[string]any{"type": "string"}
+	}
+	return ai.ToolDefinition{
+		Name:       "T",
+		Parameters: map[string]any{"type": "object", "properties": p},
+	}
+}
+
+func TestNormalizeArgKeysToSchema_CamelCaseSchemaKeptVerbatim(t *testing.T) {
+	// The yolium_* protocol tools declare camelCase parameters. A model
+	// calling them exactly as documented must NOT have its keys
+	// rewritten to snake_case (which the tool would silently drop).
+	def := schemaDef("itemId", "agentName")
+	in := json.RawMessage(`{"itemId":"x","agentName":"y"}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["itemId"] != "x" || got["agentName"] != "y" {
+		t.Errorf("camelCase schema keys must pass through verbatim, got %v", got)
+	}
+}
+
+func TestNormalizeArgKeysToSchema_SnakeRemappedToCamelSchema(t *testing.T) {
+	// Models imitating snake_case conventions emit item_id for a schema
+	// that declares itemId; remap toward the declared name.
+	def := schemaDef("itemId", "agentName")
+	in := json.RawMessage(`{"item_id":"x","agent_name":"y"}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["itemId"] != "x" || got["agentName"] != "y" {
+		t.Errorf("snake_case keys must remap to declared camelCase, got %v", got)
+	}
+	for _, k := range []string{"item_id", "agent_name"} {
+		if _, ok := got[k]; ok {
+			t.Errorf("remapped key %s should be gone", k)
+		}
+	}
+}
+
+func TestNormalizeArgKeysToSchema_CamelRemappedToSnakeSchema(t *testing.T) {
+	// Legacy direction still works: camelCase args against a snake_case
+	// schema (Edit's oldString → old_string).
+	def := schemaDef("old_string", "new_string", "path")
+	in := json.RawMessage(`{"path":"f.go","oldString":"a","newString":"b"}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["path"] != "f.go" || got["old_string"] != "a" || got["new_string"] != "b" {
+		t.Errorf("camelCase keys must remap to declared snake_case, got %v", got)
+	}
+}
+
+func TestNormalizeArgKeysToSchema_DeclaredFormWinsOnCollision(t *testing.T) {
+	def := schemaDef("old_string")
+	in := json.RawMessage(`{"old_string":"canonical","oldString":"dup"}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["old_string"] != "canonical" {
+		t.Errorf("declared form must win on collision, got %v", got)
+	}
+}
+
+func TestNormalizeArgKeysToSchema_UnknownKeysKept(t *testing.T) {
+	def := schemaDef("path")
+	in := json.RawMessage(`{"path":"a","bogusKey":true}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got["bogusKey"]; !ok {
+		t.Errorf("keys matching nothing must be kept as-is, got %v", got)
+	}
+}
+
+func TestNormalizeArgKeysToSchema_NoPropertiesFallsBackToLegacy(t *testing.T) {
+	def := ai.ToolDefinition{Name: "T", Parameters: map[string]any{"type": "object"}}
+	in := json.RawMessage(`{"oldString":"a"}`)
+	out := NormalizeArgKeysToSchema(in, def)
+
+	var got map[string]any
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["old_string"] != "a" {
+		t.Errorf("no-properties definitions fall back to snake_case normalisation, got %v", got)
+	}
+}
+
+func TestSnakeToCamel(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"item_id", "itemId"},
+		{"agent_name", "agentName"},
+		{"parent_branch", "parentBranch"},
+		{"is_feature_parent", "isFeatureParent"},
+		{"alreadyCamel", "alreadyCamel"},
+		{"plain", "plain"},
+		{"", ""},
+	}
+	for _, c := range cases {
+		got := snakeToCamel(c.in)
+		if got != c.want {
+			t.Errorf("snakeToCamel(%q) = %q; want %q", c.in, got, c.want)
 		}
 	}
 }

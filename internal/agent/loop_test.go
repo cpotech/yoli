@@ -209,6 +209,341 @@ func TestRun_SanitizesTruncatedToolCallArgumentsBeforeReplay(t *testing.T) {
 	}
 }
 
+func TestRun_OutputCapSalvagedToolCallNotExecuted(t *testing.T) {
+	// Reproduction of the real failure against vLLM + Qwen3-Coder in
+	// yolium mode: the model hits its output cap mid-tool-call and the
+	// server-side inline-XML parser salvages the cut-off call as a
+	// tool_call with VALID but empty arguments (`{}`). json.Valid can't
+	// catch that, but the response carries finish_reason "length".
+	// Executing Grep with `{}` returned a plausible full-repo listing
+	// that the model then imitated for 54 straight turns. The salvaged
+	// call must NOT execute; the tool result must explain the
+	// truncation instead.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls:    []ai.ToolCall{{ID: "cap1", Name: "Grep", Arguments: `{}`}},
+			FinishReason: "length",
+		},
+		{Content: ptr("ok, will use a shorter pattern")},
+	}}
+	ran := 0
+	grep := &fnTool{
+		def: ai.ToolDefinition{Name: "Grep", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			ran++
+			return "every file in the repo", nil
+		},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{grep},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if ran != 0 {
+		t.Fatalf("Grep ran %d times, want 0 (length-truncated calls must NOT execute)", ran)
+	}
+	var toolMsg *ai.Message
+	for i := range conv {
+		if conv[i].Role == ai.RoleTool && conv[i].ToolCallID == "cap1" {
+			toolMsg = &conv[i]
+			break
+		}
+	}
+	if toolMsg == nil || toolMsg.Content == nil {
+		t.Fatalf("expected a tool result message for the truncated call")
+	}
+	if !strings.Contains(*toolMsg.Content, "truncat") {
+		t.Fatalf("tool result = %q, want a truncation-aware error message", *toolMsg.Content)
+	}
+}
+
+func TestRun_OutputCapOnlyBlocksLastToolCall(t *testing.T) {
+	// When a length-truncated turn carries several tool calls, only the
+	// LAST one was cut off — the earlier calls completed before the cap
+	// and must still run.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls: []ai.ToolCall{
+				{ID: "ok1", Name: "T", Arguments: `{"path":"a"}`},
+				{ID: "cut1", Name: "T", Arguments: `{}`},
+			},
+			FinishReason: "length",
+		},
+		{Content: ptr("done")},
+	}}
+	var seen []string
+	tool := &fnTool{
+		def: ai.ToolDefinition{Name: "T", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, args json.RawMessage) (string, error) {
+			seen = append(seen, string(args))
+			return "ok", nil
+		},
+	}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{tool},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(seen) != 1 || seen[0] != `{"path":"a"}` {
+		t.Fatalf("executed calls = %v, want only the complete first call", seen)
+	}
+}
+
+func TestRun_MissingRequiredArgsNotExecuted(t *testing.T) {
+	// A tool call missing an argument the schema declares required must
+	// not dispatch to the tool: running with zero-value defaults gives
+	// a misleading "successful" result (an empty Grep pattern matches
+	// every file) that weak models then imitate turn after turn. The
+	// model gets an explicit error result naming the missing argument.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{ID: "m1", Name: "Grep", Arguments: `{}`}}},
+		{Content: ptr("retrying with a pattern")},
+	}}
+	ran := 0
+	grep := &fnTool{
+		def: ai.ToolDefinition{
+			Name: "Grep",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"pattern": map[string]any{"type": "string"},
+				},
+				"required": []string{"pattern"},
+			},
+		},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) {
+			ran++
+			return "should not run", nil
+		},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{grep},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if ran != 0 {
+		t.Fatalf("Grep ran %d times, want 0 (missing required args must NOT execute)", ran)
+	}
+	var toolMsg *ai.Message
+	for i := range conv {
+		if conv[i].Role == ai.RoleTool && conv[i].ToolCallID == "m1" {
+			toolMsg = &conv[i]
+			break
+		}
+	}
+	if toolMsg == nil || toolMsg.Content == nil {
+		t.Fatalf("expected a tool result message for the rejected call")
+	}
+	if !strings.Contains(*toolMsg.Content, "pattern") || !strings.Contains(*toolMsg.Content, "required") {
+		t.Fatalf("tool result = %q, want an error naming the missing required argument", *toolMsg.Content)
+	}
+}
+
+func TestRun_CamelCaseSchemaToolCallExecutesWithRequiredCheck(t *testing.T) {
+	// The yolium_* protocol tools declare camelCase parameters (itemId,
+	// agentName). A model that calls them exactly as documented must
+	// pass the required-args check and reach the tool with its keys
+	// intact — the legacy snake_case normalisation used to rewrite them
+	// to item_id/agent_name, which the tool's unmarshal silently drops.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{
+			ID: "s1", Name: "yolium_start_agent",
+			Arguments: `{"itemId":"item-1","agentName":"code-agent"}`,
+		}}},
+		{Content: ptr("done")},
+	}}
+	var got string
+	start := &fnTool{
+		def: ai.ToolDefinition{
+			Name: "yolium_start_agent",
+			Parameters: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"itemId":    map[string]any{"type": "string"},
+					"agentName": map[string]any{"type": "string"},
+				},
+				"required": []string{"itemId", "agentName"},
+			},
+		},
+		run: func(_ context.Context, args json.RawMessage) (string, error) {
+			got = string(args)
+			return "Start-agent event emitted.", nil
+		},
+	}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Tools:    []tools.Tool{start},
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got == "" {
+		t.Fatalf("tool never ran — camelCase args were rejected or mangled")
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(got), &args); err != nil {
+		t.Fatalf("unmarshal args: %v", err)
+	}
+	if args["itemId"] != "item-1" || args["agentName"] != "code-agent" {
+		t.Fatalf("tool received args %s, want camelCase keys intact", got)
+	}
+}
+
+func TestMissingRequiredArgs_JSONRoundTrippedRequiredList(t *testing.T) {
+	// Definitions that round-trip through JSON carry `required` as
+	// []any, not []string. Both shapes must be honoured.
+	def := ai.ToolDefinition{
+		Name: "T",
+		Parameters: map[string]any{
+			"type":     "object",
+			"required": []any{"path", "content"},
+		},
+	}
+	missing := missingRequiredArgs(def, json.RawMessage(`{"path":"a"}`))
+	if len(missing) != 1 || missing[0] != "content" {
+		t.Fatalf("missing = %v, want [content]", missing)
+	}
+	if got := missingRequiredArgs(def, json.RawMessage(`{"path":"a","content":"b"}`)); len(got) != 0 {
+		t.Fatalf("missing = %v, want none", got)
+	}
+}
+
+func TestRun_RetriesAbortedInlineToolCallOnce(t *testing.T) {
+	// Reproduction of the real failure against vLLM + Qwen3-Coder: the
+	// model emits its inline `<tool_call>` tag and then immediately
+	// stops, so the server-side parser returns the dangling tag as plain
+	// content with no structured tool calls. The loop must discard that
+	// turn, retry once, and never store or emit the fragment.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("Let me check the files:\n<tool_call>")},
+		{ToolCalls: []ai.ToolCall{{ID: "c1", Name: "echo", Arguments: `{}`}}},
+		{Content: ptr("done")},
+	}}
+	echo := &fnTool{
+		def: ai.ToolDefinition{Name: "echo", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil },
+	}
+	var seen []ai.Message
+	conv, err := Run(context.Background(), RunOptions{
+		Provider:  prov,
+		Model:     "m",
+		Tools:     []tools.Tool{echo},
+		Messages:  []ai.Message{userMsg("list files")},
+		OnMessage: func(m ai.Message) { seen = append(seen, m) },
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 3 {
+		t.Fatalf("provider calls = %d, want 3 (initial, retry, post-tool)", len(prov.calls))
+	}
+	for _, m := range append(conv, seen...) {
+		if m.Content != nil && strings.Contains(*m.Content, "<tool_call>") {
+			t.Fatalf("dangling <tool_call> leaked into stored/emitted message: %q", *m.Content)
+		}
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "done" {
+		t.Fatalf("last message = %+v, want final 'done' reply", last)
+	}
+}
+
+func TestRun_AbortedInlineToolCallNotRetriedTwice(t *testing.T) {
+	// If the retry ALSO comes back as an aborted inline tool call, keep
+	// the sanitized text and terminate normally — no retry storm.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("first try\n<tool_call>")},
+		{Content: ptr("second try\n<tool_call>")},
+	}}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("go")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("provider calls = %d, want 2 (initial + single retry)", len(prov.calls))
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "second try" {
+		t.Fatalf("last content = %v, want sanitized 'second try'", last.Content)
+	}
+}
+
+func TestRun_CompleteInlineToolCallBlockLeftUntouched(t *testing.T) {
+	// A properly closed <tool_call>…</tool_call> block in content is
+	// deliberate text (e.g. the model quoting its own format), not an
+	// abort: no strip, no retry.
+	text := "here is the syntax: <tool_call>example</tool_call> — got it?"
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr(text)},
+	}}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("explain")},
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if len(prov.calls) != 1 {
+		t.Fatalf("provider calls = %d, want 1 (no retry)", len(prov.calls))
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != text {
+		t.Fatalf("content = %v, want untouched %q", last.Content, text)
+	}
+}
+
+func TestRun_ScrubsPoisonedHistoryFromOutgoingRequests(t *testing.T) {
+	// Sessions saved by builds without the store-time sanitizer contain
+	// assistant turns ending in a dangling <tool_call> tag. Replaying
+	// them verbatim teaches the model to imitate the aborted pattern, so
+	// the outgoing request must carry scrubbed copies — while the
+	// caller's seed messages stay untouched.
+	poisoned := "I'll check the config.\n<tool_call>"
+	seed := []ai.Message{
+		userMsg("what is the context window?"),
+		{Role: ai.RoleAssistant, Content: ptr(poisoned)},
+		userMsg("continue"),
+	}
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("final")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: seed,
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	for _, m := range prov.calls[0].Messages {
+		if m.Content != nil && strings.Contains(*m.Content, "<tool_call>") {
+			t.Fatalf("outgoing request still contains poisoned content: %q", *m.Content)
+		}
+	}
+	if *seed[1].Content != poisoned {
+		t.Fatalf("caller's seed message was mutated: %q", *seed[1].Content)
+	}
+}
+
 func TestRun_ExecutesToolCallThenContinues(t *testing.T) {
 	prov := &scriptedProvider{responses: []ai.ChatResponse{
 		{ToolCalls: []ai.ToolCall{{ID: "call_1", Name: "echo", Arguments: `{"text":"hi"}`}}},
@@ -298,6 +633,7 @@ func TestRun_TruncatesOldToolResultsOverBudget(t *testing.T) {
 		Tools:               []tools.Tool{noop},
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -340,6 +676,7 @@ func TestRun_PreservesToolCallIDPairingDuringCompaction(t *testing.T) {
 		Model:               "m",
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -382,6 +719,7 @@ func TestRun_TruncatesOldAssistantContentWhenToolCompactionInsufficient(t *testi
 		Model:               "m",
 		Messages:            messages,
 		ContextBudgetTokens: 100,
+		MaxTokens:           10,
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -392,6 +730,46 @@ func TestRun_TruncatesOldAssistantContentWhenToolCompactionInsufficient(t *testi
 	}
 	if got[3].Content == nil || !strings.Contains(*got[3].Content, "[truncated: ") {
 		t.Fatalf("old tool content was not compacted: %+v", got[3])
+	}
+}
+
+func TestRun_ReservesOutputHeadroomWithinWindow(t *testing.T) {
+	// Regression for the vLLM 32768 cap. The loop must compact input so
+	// that estimated input + requested output never exceeds the TOTAL
+	// window. Before the output-headroom fix, compaction targeted the
+	// full window, so a conversation just under the window was sent
+	// unchanged and input+MaxTokens overflowed — the original
+	// "input 24577 + requested output 8192 > 32768" HTTP 400.
+	const window = 32768
+	const maxTokens = 8192
+	big := strings.Repeat("x", 30000) // ~7500 tokens per tool result
+	messages := []ai.Message{
+		{Role: ai.RoleSystem, Content: ptr("system")},
+		{Role: ai.RoleTool, ToolCallID: "c1", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c2", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c3", Content: ptr(big)},
+		{Role: ai.RoleTool, ToolCallID: "c4", Content: ptr(big)},
+		userMsg("recent 1"),
+		userMsg("recent 2"),
+		userMsg("recent 3"),
+		userMsg("recent 4"),
+	}
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("done")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            messages,
+		ContextBudgetTokens: window,
+		MaxTokens:           maxTokens,
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	sent := prov.calls[0].Messages
+	if input := EstimateContextTokens(sent); input+maxTokens > window {
+		t.Fatalf("input %d + output %d exceeds window %d", input, maxTokens, window)
 	}
 }
 
@@ -627,5 +1005,151 @@ func TestRun_EmptyArgumentsTreatedAsEmptyObject(t *testing.T) {
 	}
 	if len(noop.calls) != 1 {
 		t.Fatalf("noop called %d times", len(noop.calls))
+	}
+}
+
+// overflowProvider fails the first `failures` Chat calls with a typed
+// ContextOverflowError, then delegates to the scripted provider. It records
+// every request (including failed attempts) so tests can inspect what was
+// sent on each try.
+type overflowProvider struct {
+	failures int
+	failed   int
+	inner    *scriptedProvider
+	calls    []ai.ChatRequest
+}
+
+func (o *overflowProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
+	o.calls = append(o.calls, req)
+	if o.failed < o.failures {
+		o.failed++
+		return ai.ChatResponse{}, &ai.ContextOverflowError{
+			StatusCode: 400,
+			Message:    "provider: request failed: 400 Bad Request — maximum context length exceeded",
+		}
+	}
+	return o.inner.Chat(ctx, req)
+}
+
+// seedWithCompactableHistory builds a conversation whose early tool
+// messages sit outside compactConversation's protected tail, so a shrunken
+// budget visibly replaces them with truncation markers.
+func seedWithCompactableHistory() []ai.Message {
+	conv := []ai.Message{
+		{Role: ai.RoleSystem, Content: ptr("sys")},
+		userMsg("go"),
+	}
+	for _, id := range []string{"a", "b", "c", "d", "e", "f"} {
+		big := strings.Repeat("x", 4000)
+		conv = append(conv, ai.Message{Role: ai.RoleTool, ToolCallID: id, Content: &big})
+	}
+	return conv
+}
+
+func countTruncated(msgs []ai.Message) int {
+	n := 0
+	for _, m := range msgs {
+		if m.Content != nil && strings.HasPrefix(*m.Content, "[truncated:") {
+			n++
+		}
+	}
+	return n
+}
+
+// budgetWindowFor picks a total context window whose derived input budget
+// sits ~500 tokens above the given estimate, so the first request fits
+// without compaction and any budget shrink forces visible truncation.
+func budgetWindowFor(estimate, maxTokens int) int {
+	return (estimate+500)*10/9 + maxTokens
+}
+
+func TestRun_ContextOverflowRetriesWithTighterBudget(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	prov := &overflowProvider{
+		failures: 1,
+		inner:    &scriptedProvider{responses: []ai.ChatResponse{{Content: ptr("done")}}},
+	}
+	conv, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("calls = %d, want 2 (overflow then retry)", len(prov.calls))
+	}
+	if n := countTruncated(prov.calls[0].Messages); n != 0 {
+		t.Fatalf("first attempt already truncated %d messages", n)
+	}
+	if n := countTruncated(prov.calls[1].Messages); n == 0 {
+		t.Fatalf("retry after overflow did not compact any message")
+	}
+	last := conv[len(conv)-1]
+	if last.Content == nil || *last.Content != "done" {
+		t.Fatalf("final = %v", last.Content)
+	}
+}
+
+func TestRun_ContextOverflowExhaustedSurfacesError(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	prov := &overflowProvider{failures: 3, inner: &scriptedProvider{}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	var overflow *ai.ContextOverflowError
+	if !errors.As(err, &overflow) {
+		t.Fatalf("err = %v, want ContextOverflowError after exhausted retries", err)
+	}
+	if len(prov.calls) != 3 {
+		t.Fatalf("calls = %d, want 3 (initial + 2 retries)", len(prov.calls))
+	}
+}
+
+func TestRun_CalibratesBudgetFromReportedUsage(t *testing.T) {
+	seed := seedWithCompactableHistory()
+	est := estimateConversationTokens(seed)
+	noop := &fnTool{
+		def: ai.ToolDefinition{Name: "noop", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil },
+	}
+	// Turn 1 reports triple our estimate — the backend's tokenizer counts
+	// this content far denser than bytes/4. Turn 2 must then compact even
+	// though the raw estimate still fits the unscaled budget.
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{
+			ToolCalls: []ai.ToolCall{{ID: "t1", Name: "noop", Arguments: "{}"}},
+			Usage:     &ai.Usage{PromptTokens: est * 3},
+		},
+		{Content: ptr("done")},
+	}}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:            prov,
+		Model:               "m",
+		Tools:               []tools.Tool{noop},
+		Messages:            seed,
+		MaxTokens:           100,
+		ContextBudgetTokens: budgetWindowFor(est, 100),
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(prov.calls) != 2 {
+		t.Fatalf("calls = %d, want 2", len(prov.calls))
+	}
+	if n := countTruncated(prov.calls[0].Messages); n != 0 {
+		t.Fatalf("first request already truncated %d messages", n)
+	}
+	if n := countTruncated(prov.calls[1].Messages); n == 0 {
+		t.Fatalf("second request was not compacted despite 3x reported usage")
 	}
 }

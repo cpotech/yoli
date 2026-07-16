@@ -30,7 +30,7 @@ func (t *GlobTool) Definition() ai.ToolDefinition {
 		Description: "Find files matching a shell-style pattern. Supports ** for nested matches " +
 			"and {a,b} brace alternation (e.g. \"**/*.{ts,tsx}\"). " +
 			"Returns repo-relative paths sorted by mtime (newest first). " +
-			"Skips .git, node_modules, vendor, .yolium.",
+			"Skips .git, node_modules, vendor, .yolium, .pnpm-store.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -58,6 +58,12 @@ var defaultSkipDirs = map[string]bool{
 	"node_modules": true,
 	"vendor":       true,
 	".yolium":      true,
+	// pnpm's content-addressable store: tens of thousands of hex-hash
+	// paths that are never useful search results and, worse, tokenize at
+	// ~2 bytes/token — a single broad Glob over one blew a 64 KB tool
+	// result and overflowed a 65k context window in production.
+	".pnpm-store": true,
+	".pnpm":       true,
 }
 
 // Run walks the filesystem under (cwd/path) and returns paths matching the

@@ -58,7 +58,9 @@ var _ tools.Tool = (*yoliumTool)(nil)
 // NewTools returns the yolium_* tool set bound to sink and exit. The
 // caller (CLI) registers these alongside the regular tool set when
 // --yolium-mode is enabled. Standalone yoli runs do NOT register these.
-func NewTools(sink EventSink, exit *ExitSignal) []tools.Tool {
+// repoPath is the working directory checked by the yolium_complete
+// dirty-worktree guard (see complete_guard.go).
+func NewTools(sink EventSink, exit *ExitSignal, repoPath string) []tools.Tool {
 	if sink == nil {
 		sink = NopSink()
 	}
@@ -66,7 +68,7 @@ func NewTools(sink EventSink, exit *ExitSignal) []tools.Tool {
 		exit = NewExitSignal()
 	}
 	return []tools.Tool{
-		newCompleteTool(sink, exit),
+		newCompleteTool(sink, exit, repoPath),
 		newErrorTool(sink, exit),
 		newAskQuestionTool(sink, exit),
 		newProgressTool(sink),
@@ -82,13 +84,15 @@ func NewTools(sink EventSink, exit *ExitSignal) []tools.Tool {
 
 // ---------- Terminator tools ----------
 
-func newCompleteTool(sink EventSink, exit *ExitSignal) *yoliumTool {
+func newCompleteTool(sink EventSink, exit *ExitSignal, repoPath string) *yoliumTool {
 	return &yoliumTool{
 		name: ToolComplete,
 		description: "Signal that the current work item is fully done. " +
 			"Calling this tool emits a `complete` event and stops the agent loop. " +
 			"Provide a one-line summary of what was accomplished. " +
-			"verify-agent only: pass `verdict` (approved|rejected|needs_revision).",
+			"verify-agent only: pass `verdict` (approved|rejected|needs_revision). " +
+			"Commit all your changes first (git add + git commit via Bash): " +
+			"this tool is REJECTED while the git worktree has uncommitted changes.",
 		parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -104,7 +108,7 @@ func newCompleteTool(sink EventSink, exit *ExitSignal) *yoliumTool {
 			},
 			"required": []string{"summary"},
 		},
-		run: func(_ context.Context, raw json.RawMessage) (string, error) {
+		run: func(ctx context.Context, raw json.RawMessage) (string, error) {
 			var args struct {
 				Summary string `json:"summary"`
 				Verdict string `json:"verdict"`
@@ -114,6 +118,15 @@ func newCompleteTool(sink EventSink, exit *ExitSignal) *yoliumTool {
 			}
 			if args.Summary == "" {
 				return "", errors.New(ToolComplete + ": summary is required")
+			}
+			// Dirty-worktree guard (see complete_guard.go). Verdict
+			// calls are exempt: verify-agent reviews already-committed
+			// work and its test runs may leave artifacts it must not
+			// be forced to commit.
+			if args.Verdict == "" && !completeGuardDisabled() {
+				if dirty, ok := worktreeDirtyPaths(ctx, repoPath); ok && len(dirty) > 0 {
+					return "", formatDirtyGuardError(dirty)
+				}
 			}
 			evt := CompleteEvent{Summary: args.Summary, Verdict: args.Verdict}
 			if err := sink.Emit(evt); err != nil {

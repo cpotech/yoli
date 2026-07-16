@@ -11,12 +11,12 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/ai"
-	"yoli/internal/ai/providers"
 )
 
-const chatUsage = "Usage: yoli chat [--loglevel debug|info|error|none] <prompt>\n"
+const chatUsage = "Usage: yoli chat [--provider <name>] [--loglevel debug|info|error|none] <prompt>\n"
 
 // Log level ranks: higher = more verbose. A message tagged at rank R
 // is shown when the active level's rank is >= R.
@@ -46,8 +46,19 @@ const chatSystem = "You are Yoli, a small coding agent. " +
 	"Use Agent to delegate a focused sub-task to another role (e.g. planner, reviewer) in an isolated subprocess. " +
 	"Keep responses concise."
 
+// chatSystemPrompt returns chatSystem with the Available Skills section
+// appended when any skills are loaded. Shared by chat and tui.
+func chatSystemPrompt(skillList []skills.LoadedSkill) string {
+	sec := skills.InjectSection(skillList)
+	if sec == "" {
+		return chatSystem
+	}
+	return chatSystem + "\n\n" + sec
+}
+
 type chatFlags struct {
 	LogLevel    string
+	Provider    string
 	Continue    bool
 	Resume      bool
 	NoSession   bool
@@ -72,6 +83,14 @@ func parseChatFlags(args []string) (chatFlags, []string, error) {
 			i++
 		case strings.HasPrefix(arg, "--loglevel="):
 			f.LogLevel = strings.TrimPrefix(arg, "--loglevel=")
+		case arg == "--provider":
+			if i+1 >= len(args) {
+				return f, nil, fmt.Errorf("--provider requires a value")
+			}
+			f.Provider = args[i+1]
+			i++
+		case strings.HasPrefix(arg, "--provider="):
+			f.Provider = strings.TrimPrefix(arg, "--provider=")
 		case arg == "-c":
 			f.Continue = true
 		case arg == "-r":
@@ -212,24 +231,25 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = defaultModel
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	model := prof.Model
 	rank := logRank(flags.LogLevel)
 	if rank >= logRankInfo {
-		fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+		fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
 	}
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  os.Getenv("OPENROUTER_API_KEY"),
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli",
-	})
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -237,13 +257,18 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	cwd, _ := os.Getwd()
 	exe, _ := os.Executable()
 	toolset := append(
-		tools.DefaultTools(cwd),
+		tools.DefaultTools(cwd, cfg["BRAVE_API_KEY"]),
 		tools.NewSubAgentTool(tools.SubAgentOptions{
-			CLIEntry:     exe,
-			DefaultModel: model,
+			CLIEntry: exe,
+			Provider: profileName,
+			Model:    model,
 		}),
 	)
-	system := chatSystem
+	skillList := loadSkillsForPrompt(stderr)
+	if len(skillList) > 0 {
+		toolset = append(toolset, tools.NewSkillTool(skillList))
+	}
+	system := chatSystemPrompt(skillList)
 	user := prompt
 	sess, err := resolveChatSession(flags, cwd, os.Stdin)
 	if err != nil {
@@ -253,8 +278,9 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 	seed = append(seed, sess.BuildMessages()...)
 	seed = append(seed, ai.Message{Role: ai.RoleUser, Content: &user})
+	contextWindow, maxTokens := contextLimits(prof)
 	if rank >= logRankInfo {
-		fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), agent.DefaultContextBudget))
+		fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), contextWindow))
 	}
 	if _, err := sess.AppendMessage(ai.Message{Role: ai.RoleUser, Content: &user}); err != nil {
 		fmt.Fprintln(stderr, err)
@@ -262,10 +288,12 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 	}
 	nameByID := map[string]string{}
 	messages, err := agent.Run(context.Background(), agent.RunOptions{
-		Provider: provider,
-		Model:    model,
-		Tools:    toolset,
-		Messages: seed,
+		Provider:            provider,
+		Model:               model,
+		Tools:               toolset,
+		Messages:            seed,
+		MaxTokens:           maxTokens,
+		ContextBudgetTokens: contextWindow,
 		OnMessage: func(m ai.Message) {
 			if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
 				_, _ = sess.AppendMessage(m)

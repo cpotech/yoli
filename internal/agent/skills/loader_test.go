@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"testing/fstest"
 )
 
 func rootDir(t *testing.T) string {
@@ -41,7 +42,7 @@ func TestLoad_EmptyWhenAllDirsAbsent(t *testing.T) {
 	got, err := Load(LoadOptions{
 		ProjectDir: filepath.Join(root, "no-project"),
 		UserDir:    filepath.Join(root, "no-user"),
-		BuiltInDir: filepath.Join(root, "no-builtin"),
+		BuiltIn:    os.DirFS(filepath.Join(root, "no-builtin")),
 	})
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -52,15 +53,32 @@ func TestLoad_EmptyWhenAllDirsAbsent(t *testing.T) {
 }
 
 func TestLoad_BuiltInOrigin(t *testing.T) {
-	root := rootDir(t)
-	dir := filepath.Join(root, "builtin")
-	writeSkill(t, dir, "foo", "description: foo skill", "# body")
-	got, err := Load(LoadOptions{BuiltInDir: dir})
+	fsys := fstest.MapFS{
+		"foo/SKILL.md": &fstest.MapFile{Data: []byte("---\ndescription: foo skill\n---\n# body\n")},
+	}
+	got, err := Load(LoadOptions{BuiltIn: fsys})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if len(got) != 1 || got[0].Name != "foo" || got[0].Origin != OriginBuiltIn {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestLoad_BuiltInBodyExpandsWithoutDisk(t *testing.T) {
+	fsys := fstest.MapFS{
+		"foo/SKILL.md": &fstest.MapFile{Data: []byte("---\ndescription: foo skill\n---\n# embedded body\n")},
+	}
+	got, err := Load(LoadOptions{BuiltIn: fsys})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	body, err := Expand("foo", got)
+	if err != nil {
+		t.Fatalf("expand: %v", err)
+	}
+	if body != "# embedded body" {
+		t.Fatalf("body = %q", body)
 	}
 }
 
@@ -131,7 +149,7 @@ func TestLoad_PrecedenceProjectOverUserOverBuiltIn(t *testing.T) {
 	writeSkill(t, userDir, "shared", "description: user version", "body")
 	writeSkill(t, builtInDir, "shared", "description: built-in version", "body")
 
-	got, err := Load(LoadOptions{ProjectDir: projectDir, UserDir: userDir, BuiltInDir: builtInDir})
+	got, err := Load(LoadOptions{ProjectDir: projectDir, UserDir: userDir, BuiltIn: os.DirFS(builtInDir)})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -139,7 +157,7 @@ func TestLoad_PrecedenceProjectOverUserOverBuiltIn(t *testing.T) {
 		t.Fatalf("got %+v", got)
 	}
 
-	got2, err := Load(LoadOptions{UserDir: userDir, BuiltInDir: builtInDir})
+	got2, err := Load(LoadOptions{UserDir: userDir, BuiltIn: os.DirFS(builtInDir)})
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

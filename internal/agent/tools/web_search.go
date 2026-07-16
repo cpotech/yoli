@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 
@@ -27,21 +26,24 @@ const (
 type WebSearchTool struct {
 	httpClient *http.Client
 	endpoint   string
+	apiKey     string
 }
 
 // NewWebSearchTool constructs a WebSearchTool backed by http.DefaultClient
-// and the public Brave Search endpoint.
-func NewWebSearchTool() *WebSearchTool {
-	return &WebSearchTool{httpClient: http.DefaultClient, endpoint: braveDefaultEndpoint}
+// and the public Brave Search endpoint. apiKey is the BRAVE_API_KEY
+// config value; it may be empty, in which case Run reports the missing
+// key when called.
+func NewWebSearchTool(apiKey string) *WebSearchTool {
+	return &WebSearchTool{httpClient: http.DefaultClient, endpoint: braveDefaultEndpoint, apiKey: apiKey}
 }
 
 // newWebSearchToolWithClient builds a WebSearchTool with an injected
 // HTTP client and endpoint, used by tests against httptest servers.
-func newWebSearchToolWithClient(endpoint string, client *http.Client) *WebSearchTool {
+func newWebSearchToolWithClient(endpoint string, client *http.Client, apiKey string) *WebSearchTool {
 	if client == nil {
 		client = http.DefaultClient
 	}
-	return &WebSearchTool{httpClient: client, endpoint: endpoint}
+	return &WebSearchTool{httpClient: client, endpoint: endpoint, apiKey: apiKey}
 }
 
 // Definition returns the JSON-schema description for the model.
@@ -49,7 +51,7 @@ func (t *WebSearchTool) Definition() ai.ToolDefinition {
 	return ai.ToolDefinition{
 		Name: "WebSearch",
 		Description: "Search the web via the Brave Search API. " +
-			"Returns a numbered list of (title, URL, snippet). Requires BRAVE_API_KEY.",
+			"Returns a numbered list of (title, URL, snippet). Requires the BRAVE_API_KEY config setting.",
 		Parameters: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -101,9 +103,8 @@ func (t *WebSearchTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 	if count > webSearchMaxN {
 		count = webSearchMaxN
 	}
-	apiKey := os.Getenv("BRAVE_API_KEY")
-	if apiKey == "" {
-		return "", errors.New("web_search: BRAVE_API_KEY is not set")
+	if t.apiKey == "" {
+		return "", errors.New("web_search: BRAVE_API_KEY is not set in the config file")
 	}
 
 	u, err := url.Parse(t.endpoint)
@@ -119,7 +120,7 @@ func (t *WebSearchTool) Run(ctx context.Context, raw json.RawMessage) (string, e
 	if err != nil {
 		return "", fmt.Errorf("web_search: build request: %w", err)
 	}
-	req.Header.Set("X-Subscription-Token", apiKey)
+	req.Header.Set("X-Subscription-Token", t.apiKey)
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := t.httpClient.Do(req)

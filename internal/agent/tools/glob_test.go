@@ -133,6 +133,8 @@ func TestGlob_SkipsDotGitAndNodeModules(t *testing.T) {
 	writeFile(t, root, "node_modules/pkg/y.go", "")
 	writeFile(t, root, "vendor/lib/z.go", "")
 	writeFile(t, root, ".yolium/cache/q.go", "")
+	writeFile(t, root, ".pnpm-store/v10/index/h.go", "")
+	writeFile(t, root, ".pnpm/pkg/i.go", "")
 	tool := NewGlobTool(root)
 	got, err := tool.Run(context.Background(), mustJSON(t, map[string]any{"pattern": "**/*.go"}))
 	if err != nil {

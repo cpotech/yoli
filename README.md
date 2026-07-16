@@ -39,49 +39,20 @@ go install ./cmd/yoli
 # yoli is now available at $(go env GOBIN || echo $(go env GOPATH)/bin)/yoli
 ```
 
-## Running in a container (recommended)
+## Run in a sandbox
 
-Coding agents are not security boundaries. They can be vulnerable to prompt injection, may hallucinate or produce incorrect outputs, 
-and can occasionally perform unintended actions (such as destructive commands or unexpected network requests). Running Yoli in a container 
-is strongly recommended to isolate execution and protect your host system from both malicious inputs and accidental mistakes.
-
-### Quick way: the wrapper script
-
-[`scripts/yoli-docker.sh`](scripts/yoli-docker.sh) builds the image on first
-use and runs yoli with the current directory mounted. Arguments pass straight
-through to yoli:
+The agent's `Bash` tool runs arbitrary commands, so you may want to isolate it
+from your host. yoli ships a [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)
+**kit** that runs the agent in a microVM (its own filesystem and network) against
+the current repository. `scripts/sbx.sh` is the one-command entry point:
 
 ```bash
-export OPENROUTER_API_KEY=...           # your key
-scripts/yoli-docker.sh       # interactive tui
-FORCE_BUILD=1 scripts/yoli-docker.sh ... # rebuild the image first
+scripts/sbx.sh              # yoli TUI in a sandbox on the current directory
 ```
 
-Credentials come from one of two places: `OPENROUTER_API_KEY` (and
-`BRAVE_API_KEY`) forwarded from your environment, or — if those aren't set —
-your host config at `~/.config/yoli/config.json`, which the script mounts
-read-only so yoli reads the stored keys and `default_model` itself. Set them
-once with `yoli config set` and the container picks them up. See
-[docs/configuration.md](docs/configuration.md).
-
-### Locking down the network (firewall)
-
-Yoli needs the network to reach the model. The firewall mode applies a smarter
-policy: **outbound internet is allowed; your LAN, router, and cloud metadata
-endpoints are blocked; no inbound access.** Just add `FIREWALL=1` to the
-wrapper script:
-
-```bash
-export OPENROUTER_API_KEY=...                 # required
-FIREWALL=1 scripts/yoli-docker.sh             # interactive tui
-FIREWALL=1 scripts/yoli-docker.sh chat "hi"   # one-shot chat
-```
-
-Under the hood this runs [`docker-compose.egress.yml`](docker-compose.egress.yml):
-a sidecar owns a network namespace and installs iptables rules
-([`deploy/egress-firewall.sh`](deploy/egress-firewall.sh)) that the yoli
-container joins, so the rules cover every protocol, not just HTTP. Edit those
-rules to tighten the policy.
+Your **API keys never enter the sandbox**: yoli gets a placeholder config and the
+host-side proxy swaps in the real key on egress. Requires the `sbx` CLI. See
+[docs/sandbox.md](docs/sandbox.md) for setup, credential handling, and testing.
 
 ## Layout
 
@@ -89,14 +60,15 @@ rules to tighten the policy.
 cmd/yoli/                 # main package → `yoli` binary
 internal/
   ai/                     # provider-agnostic chat types + Provider interface
-    providers/            # openrouter, faux
+    providers/            # openai-compatible (OpenRouter, vLLM, …), faux
   agent/                  # agent loop, roles, stdio runner
     context/              # AGENTS.md loader
     session/              # JSONL session store (branching, fork/resume)
     skills/               # loader, injector, expander
-    tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent
+    tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent, Skill
     yolium/               # NDJSON protocol + bridge tools
   cli/                    # command surface (chat, tui, run, agent, session, skills, config)
+skills/                   # built-in skills (plan, …), embedded into the binary via go:embed
 ```
 
 `internal/` keeps every package unimportable from outside the module.
@@ -118,17 +90,17 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `yoli run --role <role>` | Run the stdio agent with the given role (`coder`, `planner`, `reviewer`). |
 | `yoli agent [flags]` | Run the headless agent loop and emit Yolium NDJSON progress/complete events on stdout. |
 | `yoli session list \| current \| tree \| branch` | Inspect and operate on session files. |
-| `yoli skills list` / `show <name>` | Inspect skills available to the agent. |
+| `yoli skills list` / `show <name>` | Inspect skills available to the agent (see [Skills](#skills)). |
 | `yoli config path` | Print the resolved user config file path. |
 | `yoli config get <key>` | Print the effective value of a known config key. |
 | `yoli config set <key> <value>` | Persist a value into the user config file. |
-| `yoli config list` | Print every known key with its value and source (`env`, `project`, `user`, or `default`). |
+| `yoli config list` | Print every known key with its value and source (`project`, `user`, or `default`). |
 
 ### `yoli agent` flags
 
 | Flag | Equivalent env var | Description |
 |---|---|---|
-| `--model <slug>` | `AGENT_MODEL` | OpenRouter model slug (default: `openrouter/free`). |
+| `--model <slug>` | `AGENT_MODEL` | Model identifier, sent to the backend verbatim (default: `openrouter/free`). |
 | `--tools <a,b,c>` | `AGENT_TOOLS` | Comma-separated tool whitelist; defaults to all tools except `ask_question` (which is always excluded in headless mode). |
 | `--prompt <text>` | `AGENT_PROMPT` (base64) | Inline prompt text. |
 | `--prompt-file <path>` | `AGENT_PROMPT_FILE` | Read prompt from a file. |
@@ -137,7 +109,17 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `--fork <path\|id>` | `AGENT_FORK` | Fork a source session into a new session whose `parentSession` is the source. |
 | `--continue` | `AGENT_CONTINUE` | Continue the most recent session for the cwd. |
 | `--no-session` | *(none)* | Run without writing a session file. |
-| *(env only)* | `OPENROUTER_API_KEY` | Required. May also come from `yoli config set openrouter_api_key`. |
+
+Connection settings come from the active provider profile in the config
+file, not env vars (see [docs/configuration.md](docs/configuration.md)):
+
+| Profile field | Description |
+|---|---|
+| `api_key` | Required. |
+| `base_url` | OpenAI-compatible endpoint (required). See [docs/self-hosting.md](docs/self-hosting.md). |
+| `model` | Model identifier sent to the backend verbatim. |
+| `context_window` | Total context window in tokens (input + output). Set to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom and never overflows. Default 180000. |
+| `max_tokens` | Per-turn output-token cap (default 8192); lower it to leave more of the window for input. |
 
 Output is the Yolium NDJSON protocol (`progress` and `complete` events), not Claude Code's `stream-json`. There is no `--output-format`, `--allowedTools`, `--dangerously-skip-permissions`, or `--verbose` flag.
 
@@ -150,15 +132,38 @@ one with `--session <path|id>`, or fork with `--fork <path|id>`. See
 [docs/session-format.md](docs/session-format.md) for the on-disk format and
 [`yoli session`](#commands) for inspection.
 
+## Skills
+
+A skill is a `SKILL.md` with YAML frontmatter that packages a focused
+methodology the agent adopts on demand. `yoli agent`, `chat`, and `tui`
+advertise available skills in the system prompt; the model fetches a
+skill's body with the `Skill` tool when the task matches its trigger. In
+the TUI you can also pin one yourself — **Shift-Tab** cycles the active
+skill (shown in the prompt as `[plan] > `), or use `/skill <name|off>`.
+
+Skills load from `./.yoli/skills/` (project), `~/.yoli/skills/` (user),
+and the built-ins embedded in the binary — currently `plan`, which
+produces a structured implementation plan without writing code. Project
+overrides user overrides built-in. See [docs/skills.md](docs/skills.md).
+
 ## Providers
 
-| Provider | Required env var |
+| Provider | Configuration |
 |---|---|
-| `openrouter` | `OPENROUTER_API_KEY` |
+| openai-compatible | a provider profile: `base_url` + `api_key` (+ `model`, limits) |
 | `faux` | none (deterministic stub for tests) |
 
-Provider credentials and defaults can also be stored via `yoli config set`
-so they persist across shells. See [docs/configuration.md](docs/configuration.md).
+Any OpenAI-compatible endpoint works — point a profile's `base_url` at
+OpenRouter or a self-hosted vLLM server (e.g. on a RunPod GPU pod); see
+[docs/self-hosting.md](docs/self-hosting.md). All settings live in
+provider profiles in the config file, edited by hand; environment
+variables are not read. See
+[docs/configuration.md](docs/configuration.md).
+
+Endpoints are named profiles under the `providers` key of the config
+file, selected with `--provider <name>` (on `chat`, `tui`, `run`, and
+`agent`), the `default_provider` config key, or the `/provider` command
+inside the TUI. `yoli config providers` lists the defined profiles.
 
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.
@@ -168,6 +173,21 @@ so they persist across shells. See [docs/configuration.md](docs/configuration.md
 ```bash
 go test ./...
 ```
+
+## Building & versions
+
+Every build stamps a version into the binary (`yoli/internal/cli.Version`),
+reported by `yoli version`. The version comes from `git describe --tags
+--dirty --always`:
+
+- with a reachable tag: `v0.1.0` or `v0.1.0-3-ga011326-dirty` (commits since tag + sha + dirty tree),
+- without a tag: the short commit sha (optionally `-dirty`),
+- with no git or linker flag: `dev`.
+
+The version is applied consistently across build paths:
+
+- **Host build** — `scripts/build.sh` (honors `GOOS`/`GOARCH`, `OUTPUT`, `YOLI_VERSION`).
+- **Releases** — `scripts/release.sh <version>` (e.g. `v0.2.0`) creates an annotated git tag and cross-compiles versioned binaries into `dist/` (`yoli-<os>-<arch>` for linux/darwin × amd64/arm64), rebuilding the root `yoli` with the same version. Push the tag with `git push origin <version>` to publish.
 
 ## Docs
 

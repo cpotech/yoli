@@ -12,23 +12,35 @@ import (
 	"path/filepath"
 )
 
-// ConfigKeys is the canonical list of known configuration keys, in the
-// order they should appear in `yoli config list` output.
+// ConfigKeys is the canonical list of known flat configuration keys, in
+// the order they should appear in `yoli config list` output. Endpoint
+// settings (base_url, api_key, model, context_window, max_tokens) live
+// exclusively in provider profiles under the "providers" object.
 var ConfigKeys = []string{
 	"default_provider",
-	"default_model",
-	"default_role",
-	"openrouter_api_key",
-	"brave_api_key",
-	"subagent_max_depth",
+	"BRAVE_API_KEY",
 }
 
-// envBindings maps a config key to the env var it can populate via
-// ApplyEnvDefaults. Keys missing from the map are file-only.
-var envBindings = map[string]string{
-	"openrouter_api_key": "OPENROUTER_API_KEY",
-	"brave_api_key":      "BRAVE_API_KEY",
-	"default_model":      "OPENROUTER_MODEL",
+// renamedKeys maps renamed config keys to their replacements so
+// filterKnown can auto-migrate values.
+var renamedKeys = map[string]string{
+	"brave_api_key": "BRAVE_API_KEY",
+	"YOLI_PROVIDER": "default_provider",
+}
+
+// profileOnlyKeys lists retired flat keys whose settings moved into
+// provider profiles. filterKnown points at the profile field so a stale
+// config (e.g. a lingering api_key) is not silently ignored.
+var profileOnlyKeys = map[string]string{
+	"YOLI_API_KEY":        "api_key",
+	"api_key":             "api_key",
+	"openrouter_api_key":  "api_key",
+	"YOLI_BASE_URL":       "base_url",
+	"base_url":            "base_url",
+	"YOLI_MODEL":          "model",
+	"default_model":       "model",
+	"YOLI_CONTEXT_WINDOW": "context_window",
+	"YOLI_MAX_TOKENS":     "max_tokens",
 }
 
 // Config is the merged, in-memory form of a yoli configuration. A
@@ -39,7 +51,6 @@ type Config map[string]string
 type ConfigSource string
 
 const (
-	SourceEnv     ConfigSource = "env"
 	SourceProject ConfigSource = "project"
 	SourceUser    ConfigSource = "user"
 	SourceDefault ConfigSource = "default"
@@ -135,6 +146,9 @@ func ReadConfigFile(path string) (Config, error) {
 			out[k] = val
 		case nil:
 			// skip explicit nulls
+		case map[string]any, []any:
+			// Structured values (e.g. the "providers" object) are not
+			// part of the flat config; ReadProviderProfiles parses them.
 		default:
 			out[k] = fmt.Sprint(val)
 		}
@@ -170,6 +184,20 @@ func filterKnown(in Config, sourceLabel string, warnings io.Writer) Config {
 		}
 		fmt.Fprintf(warnings, "warning: ignoring unknown config keys in %s: %s\n",
 			sourceLabel, joinComma(unknown))
+		for _, k := range unknown {
+			if newKey, ok := renamedKeys[k]; ok {
+				if _, exists := known[newKey]; !exists {
+					known[newKey] = in[k]
+				}
+				fmt.Fprintf(warnings,
+					"warning: config key %q was renamed to %q — value auto-migrated\n",
+					k, newKey)
+			} else if field, ok := profileOnlyKeys[k]; ok {
+				fmt.Fprintf(warnings,
+					"warning: config key %q was retired — set %q in a provider profile instead\n",
+					k, field)
+			}
+		}
 	}
 	return known
 }
@@ -185,24 +213,11 @@ func joinComma(items []string) string {
 	return out
 }
 
-func readFromEnv() Config {
-	out := Config{}
-	for _, key := range ConfigKeys {
-		envName, ok := envBindings[key]
-		if !ok {
-			continue
-		}
-		if v := os.Getenv(envName); v != "" {
-			out[key] = v
-		}
-	}
-	return out
-}
-
-// LoadConfig merges all configured sources with precedence env >
-// project (<cwd>/.yolirc.json) > user (~/.config/yoli/config.json) >
-// defaults. Unknown keys in either file generate a warning but do not
-// fail the load.
+// LoadConfig merges the configured sources with precedence project
+// (<cwd>/.yolirc.json) > user (~/.config/yoli/config.json) > defaults.
+// The process environment is never consulted: config files are the only
+// source of settings. Unknown keys in either file generate a warning
+// but do not fail the load.
 func LoadConfig(opts LoadOptions) (Config, error) {
 	cwd := opts.Cwd
 	if cwd == "" {
@@ -226,8 +241,6 @@ func LoadConfig(opts LoadOptions) (Config, error) {
 	}
 	projectCfg := filterKnown(projectRaw, projectPath, opts.Warnings)
 
-	envCfg := readFromEnv()
-
 	out := Config{}
 	for k, v := range userCfg {
 		out[k] = v
@@ -235,15 +248,12 @@ func LoadConfig(opts LoadOptions) (Config, error) {
 	for k, v := range projectCfg {
 		out[k] = v
 	}
-	for k, v := range envCfg {
-		out[k] = v
-	}
 	return out, nil
 }
 
 // GetEffectiveConfig returns one EffectiveEntry per known key, in the
 // order defined by ConfigKeys, annotated with which source provided
-// the value (env|project|user|default).
+// the value (project|user|default).
 func GetEffectiveConfig(opts LoadOptions) ([]EffectiveEntry, error) {
 	cwd := opts.Cwd
 	if cwd == "" {
@@ -267,14 +277,8 @@ func GetEffectiveConfig(opts LoadOptions) ([]EffectiveEntry, error) {
 	}
 	projectCfg := filterKnown(projectRaw, projectPath, opts.Warnings)
 
-	envCfg := readFromEnv()
-
 	out := make([]EffectiveEntry, 0, len(ConfigKeys))
 	for _, key := range ConfigKeys {
-		if v, ok := envCfg[key]; ok {
-			out = append(out, EffectiveEntry{Key: key, Value: v, Source: SourceEnv})
-			continue
-		}
 		if v, ok := projectCfg[key]; ok {
 			out = append(out, EffectiveEntry{Key: key, Value: v, Source: SourceProject})
 			continue
@@ -288,39 +292,28 @@ func GetEffectiveConfig(opts LoadOptions) ([]EffectiveEntry, error) {
 	return out, nil
 }
 
-// ApplyEnvDefaults exports config values to the process environment
-// for keys with an env binding, without ever overwriting a value
-// already set in the environment.
-func ApplyEnvDefaults(cfg Config) {
-	for key, envName := range envBindings {
-		if os.Getenv(envName) != "" {
-			continue
-		}
-		if v, ok := cfg[key]; ok {
-			_ = os.Setenv(envName, v)
-		}
-	}
-}
-
 // SetConfigValue persists key=value to the user-level config file,
 // creating intermediate directories as needed. Returns an error for
-// unknown keys and never creates the file in that case.
+// unknown keys and never creates the file in that case. Other keys —
+// including the structured "providers" object — are preserved verbatim.
 func SetConfigValue(key, value string, opts PathOptions) error {
 	if !IsConfigKey(key) {
 		return fmt.Errorf("Unknown config key: %s", key)
 	}
 	path := ConfigPath(opts)
-	existing := Config{}
-	if _, err := os.Stat(path); err == nil {
-		loaded, err := ReadConfigFile(path)
-		if err != nil {
-			return err
+	existing := map[string]json.RawMessage{}
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &existing); err != nil {
+			return &ConfigParseError{Path: path, Err: err}
 		}
-		existing = loaded
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	existing[key] = value
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	existing[key] = encoded
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

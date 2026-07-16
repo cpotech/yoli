@@ -8,30 +8,23 @@ import (
 )
 
 func TestResolveSkillDirs_ProjectDirIsCwdYoliSkills(t *testing.T) {
-	d := ResolveSkillDirs("/tmp/project", "/home/user", "/opt/yoli/bin/yoli")
+	d := ResolveSkillDirs("/tmp/project", "/home/user")
 	if d.ProjectDir != "/tmp/project/.yoli/skills" {
 		t.Fatalf("projectDir = %q", d.ProjectDir)
 	}
 }
 
 func TestResolveSkillDirs_UserDirFromHome(t *testing.T) {
-	d := ResolveSkillDirs("/tmp/project", "/home/user", "/opt/yoli/bin/yoli")
+	d := ResolveSkillDirs("/tmp/project", "/home/user")
 	if d.UserDir != "/home/user/.yoli/skills" {
 		t.Fatalf("userDir = %q", d.UserDir)
 	}
 }
 
 func TestResolveSkillDirs_UserDirEmptyWhenNoHome(t *testing.T) {
-	d := ResolveSkillDirs("/tmp/project", "", "/opt/yoli/bin/yoli")
+	d := ResolveSkillDirs("/tmp/project", "")
 	if d.UserDir != "" {
 		t.Fatalf("userDir = %q", d.UserDir)
-	}
-}
-
-func TestResolveSkillDirs_BuiltInDirRelativeToCLIEntry(t *testing.T) {
-	d := ResolveSkillDirs("/tmp/project", "/home/user", "/opt/yoli/bin/yoli")
-	if d.BuiltInDir != "/opt/yoli/skills" {
-		t.Fatalf("builtInDir = %q", d.BuiltInDir)
 	}
 }
 

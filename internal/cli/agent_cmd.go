@@ -14,20 +14,20 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/agent/yolium"
 	"yoli/internal/ai"
-	"yoli/internal/ai/providers"
 )
 
-const defaultModel = "openrouter/free"
-
-const agentUsage = `Usage: yoli agent [--model <slug>] [--tools <comma-separated>] [--prompt-file <file>] [--prompt <text>] [--yolium-mode] [--events-fd <N>]
+const agentUsage = `Usage: yoli agent [--model <slug>] [--provider <name>] [--tools <comma-separated>] [--prompt-file <file>] [--prompt <text>] [--yolium-mode] [--events-fd <N>]
 
 Run the headless agent loop. Reads prompt from AGENT_PROMPT_FILE (file)
 or AGENT_PROMPT (base64) or --prompt-file or --prompt.
 
 Flags:
+  --provider <name>  Use a named provider profile from the config file's
+                     "providers" object (endpoint, key, model, limits).
   --yolium-mode      Register yolium_* protocol tools, change loop-exit
                      semantics, and treat terminator tools (yolium_complete /
                      yolium_error / yolium_ask_question) as the sole way to
@@ -37,18 +37,27 @@ Flags:
                      when --yolium-mode is enabled. Defaults unset (events
                      discarded). Yolium passes fd=3.
 
-Environment:
-  AGENT_MODEL          Model slug (default: openrouter/free)
+Environment (orchestrator plumbing — settings live in the config file):
+  AGENT_MODEL          Model slug override from the host orchestrator
   AGENT_TOOLS          Comma-separated tool whitelist (default: all)
   AGENT_PROMPT_FILE    Path to prompt file
   AGENT_PROMPT         Base64-encoded prompt text
   AGENT_GOAL           Base64-encoded goal description
-  OPENROUTER_API_KEY   Required
   YOLIUM_CAVEMAN_MODE  off | lite | full | ultra (yolium-mode only)
+  YOLI_COMPLETE_GUARD  Set to "off" to disable the dirty-worktree guard
+                       that rejects completion while uncommitted git
+                       changes exist (yolium-mode only)
+
+Settings come from the provider profile selected via --provider or the
+"default_provider" config key: base_url, api_key, model, context_window
+(match your server's cap, e.g. a vLLM max_model_len; default 180000),
+and max_tokens (per-turn output cap, default 8192). See
+docs/configuration.md.
 `
 
 type agentFlags struct {
 	Model      string
+	Provider   string
 	Tools      string
 	PromptFile string
 	Prompt     string
@@ -72,6 +81,14 @@ func parseAgentFlags(args []string) (agentFlags, error) {
 			i++
 		case strings.HasPrefix(args[i], "--model="):
 			f.Model = strings.TrimPrefix(args[i], "--model=")
+		case args[i] == "--provider":
+			if i+1 >= len(args) {
+				return f, errors.New("--provider requires a value")
+			}
+			f.Provider = args[i+1]
+			i++
+		case strings.HasPrefix(args[i], "--provider="):
+			f.Provider = strings.TrimPrefix(args[i], "--provider=")
 		case args[i] == "--tools":
 			if i+1 >= len(args) {
 				return f, errors.New("--tools requires a value")
@@ -250,16 +267,13 @@ func (p *usageRecordingProvider) Cumulative() ai.Usage {
 	return p.total
 }
 
-// resolveModel returns the model slug, preferring the flag, then AGENT_MODEL,
-// then the free default. The slug is passed through to OpenRouter unchanged.
+// resolveModel returns the model slug from the flag or AGENT_MODEL env var.
+// Returns empty string when neither is set.
 func resolveModel(flagModel string) string {
 	if flagModel != "" {
 		return flagModel
 	}
-	if m := os.Getenv("AGENT_MODEL"); m != "" {
-		return m
-	}
-	return defaultModel
+	return os.Getenv("AGENT_MODEL")
 }
 
 // resolveRepoPath returns the working directory the agent operates on.
@@ -294,18 +308,31 @@ type agentLoopConfig struct {
 	whitelist  []string
 	repoPath   string
 	yoliumMode bool
+	// braveAPIKey credentials the WebSearch tool ("" leaves it erroring
+	// at call time).
+	braveAPIKey string
+	// providerName is the active profile, propagated to sub-agents via
+	// --provider.
+	providerName string
+	// contextWindow / maxTokens come from the active profile. Zero (in
+	// tests) falls back to the agent defaults.
+	contextWindow int
+	maxTokens     int
+	// skillList is advertised in the system prompt and served by the
+	// Skill tool. Empty means no section and no tool.
+	skillList []skills.LoadedSkill
 	// eventSink receives structured events when yoliumMode is on. Nil
 	// is treated as yolium.NopSink. Standalone runs always use NopSink.
-	eventSink      yolium.EventSink
-	sessionRoot    string
-	sessionTarget  string
-	sessionFork    string
+	eventSink       yolium.EventSink
+	sessionRoot     string
+	sessionTarget   string
+	sessionFork     string
 	sessionContinue bool
 	noSession       bool
 }
 
-// runAgent implements the `yoli agent` subcommand: it resolves flags, env,
-// and the OpenRouter provider, then drives the headless loop.
+// runAgent implements the `yoli agent` subcommand: it resolves flags,
+// config, and the provider, then drives the headless loop.
 func runAgent(args []string, stdout, stderr io.Writer) int {
 	flags, err := parseAgentFlags(args)
 	if err != nil {
@@ -332,23 +359,27 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-
-	apiKey := os.Getenv("OPENROUTER_API_KEY")
-	if apiKey == "" {
-		if k, ok := cfg["openrouter_api_key"]; ok && k != "" {
-			apiKey = k
-		}
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
-	if apiKey == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
 
 	model := resolveModel(flags.Model)
+	if model == "" {
+		model = prof.Model
+	}
 	goal := readGoal()
 
-	fmt.Fprintf(stderr, "yoli: model=%s\n", model)
+	fmt.Fprintf(stderr, "yoli: provider=%s model=%s\n", profileName, model)
 	preview := prompt
 	if len(preview) > 80 {
 		preview = preview[:80] + "..."
@@ -358,11 +389,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "yoli: goal=%s\n", goal)
 	}
 
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  apiKey,
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli Agent",
-	})
+	provider, err := newProviderFromProfile(prof, "Yoli Agent")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -385,6 +412,7 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		sink = yolium.NewNDJSONSink(fdFile)
 	}
 
+	contextWindow, maxTokens := contextLimits(prof)
 	return runAgentLoop(agentLoopConfig{
 		provider:        provider,
 		model:           model,
@@ -394,6 +422,11 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 		whitelist:       whitelist,
 		repoPath:        resolveRepoPath(),
 		yoliumMode:      flags.YoliumMode,
+		braveAPIKey:     cfg["BRAVE_API_KEY"],
+		providerName:    profileName,
+		contextWindow:   contextWindow,
+		maxTokens:       maxTokens,
+		skillList:       loadSkillsForPrompt(stderr),
 		eventSink:       sink,
 		sessionTarget:   firstNonEmpty(flags.Session, os.Getenv("AGENT_SESSION")),
 		sessionFork:     firstNonEmpty(flags.Fork, os.Getenv("AGENT_FORK")),
@@ -432,15 +465,23 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	defaultToolset := tools.DefaultTools(c.repoPath)
+	defaultToolset := tools.DefaultTools(c.repoPath, c.braveAPIKey)
 	filteredTools := filterAgentTools(defaultToolset, c.whitelist)
 
 	subAgent := tools.NewSubAgentTool(tools.SubAgentOptions{
-		CLIEntry:     c.exe,
-		DefaultModel: c.model,
+		CLIEntry: c.exe,
+		Provider: c.providerName,
+		Model:    c.model,
 	})
 
 	allTools := append(filteredTools, subAgent)
+
+	// The Skill tool is registered after whitelist filtering (like the
+	// Agent tool) so AGENT_TOOLS cannot strand skills that the system
+	// prompt advertises.
+	if len(c.skillList) > 0 {
+		allTools = append(allTools, tools.NewSkillTool(c.skillList))
+	}
 
 	// Under --yolium-mode, register the yolium_* protocol tools. The
 	// terminator tools (yolium_complete, yolium_error, yolium_ask_question)
@@ -448,7 +489,7 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// tools (progress, comment, etc.) emit structured events via the
 	// EventSink and return short acks.
 	if c.yoliumMode {
-		allTools = append(allTools, yolium.NewTools(sink, exit)...)
+		allTools = append(allTools, yolium.NewTools(sink, exit, c.repoPath)...)
 	}
 
 	for i, t := range allTools {
@@ -481,8 +522,10 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			"DO NOT emit `@@YOLIUM:{...}` lines as plain text — under " +
 			"--yolium-mode those are ignored. The terminator tools " +
 			"are the ONLY way to end the loop; a turn with no tool calls " +
-			"is treated as 'keep going'. If you cannot finish the task, " +
-			"call yolium_error with a one-sentence reason."
+			"is treated as 'keep going'. yolium_complete is rejected while " +
+			"uncommitted git changes exist — commit your work (git add + " +
+			"git commit via Bash) before calling it. If you cannot finish " +
+			"the task, call yolium_error with a one-sentence reason."
 	} else {
 		system = "You are Yoli, a headless coding agent. " +
 			"Use the provided tools to inspect and modify the working directory. " +
@@ -506,6 +549,10 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			"rather than going silent."
 	}
 
+	if sec := skills.InjectSection(c.skillList); sec != "" {
+		system += "\n\n" + sec
+	}
+
 	messages := []ai.Message{
 		{Role: ai.RoleSystem, Content: &system},
 	}
@@ -518,7 +565,14 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	messages = append(messages, ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 	_, _ = sess.AppendMessage(ai.Message{Role: ai.RoleUser, Content: &c.prompt})
 
-	fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(messages), agent.DefaultContextBudget))
+	contextWindow, maxTokens := c.contextWindow, c.maxTokens
+	if contextWindow <= 0 {
+		contextWindow = agent.DefaultContextBudget
+	}
+	if maxTokens <= 0 {
+		maxTokens = agent.DefaultMaxOutputTokens
+	}
+	fmt.Fprintf(stderr, "yoli: context-size: %s\n", formatContextSize(agent.EstimateContextTokens(messages), contextWindow))
 
 	turn := 0
 	// bashCallIDs tracks tool-call IDs whose call name was "Bash" so we
@@ -528,13 +582,27 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// agent definition docs with example lines) and would otherwise be
 	// misparsed as terminal events.
 	bashCallIDs := make(map[string]bool)
+	// Text-protocol completion guard: under --yolium-mode a complete
+	// line in assistant prose or Bash output is suppressed while the
+	// worktree has uncommitted changes, enforcing the same invariant
+	// as the yolium_complete tool (see yolium/complete_guard.go).
+	suppressTextComplete := func() bool {
+		if !c.yoliumMode {
+			return false
+		}
+		if !yolium.WorktreeBlocksComplete(context.Background(), c.repoPath) {
+			return false
+		}
+		fmt.Fprintln(stderr, "yoli: text complete suppressed: uncommitted changes in worktree")
+		return true
+	}
 	onMessage := func(m ai.Message) {
 		switch m.Role {
 		case ai.RoleAssistant:
 			turn++
 			if m.Content != nil && *m.Content != "" {
 				logAssistantContent(stderr, turn, *m.Content)
-				dispatchAssistantEvents(*m.Content, stdout, exit)
+				dispatchAssistantEvents(*m.Content, stdout, exit, suppressTextComplete)
 				// Under --yolium-mode, mirror the raw assistant text on the
 				// structured EventSink so Yolium can populate its
 				// agentMessageTexts list (used for the "non-Claude provider
@@ -558,7 +626,7 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 			if m.Content != nil {
 				logToolResult(stderr, turn, m.ToolCallID, *m.Content)
 				if bashCallIDs[m.ToolCallID] {
-					dispatchBashResultEvents(*m.Content, stdout, exit)
+					dispatchBashResultEvents(*m.Content, stdout, exit, suppressTextComplete)
 					delete(bashCallIDs, m.ToolCallID)
 				}
 			}
@@ -567,13 +635,15 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	}
 
 	conv, runErr := agent.Run(context.Background(), agent.RunOptions{
-		Provider:   recordingProvider,
-		Model:      c.model,
-		Tools:      allTools,
-		Messages:   messages,
-		OnMessage:  onMessage,
-		Stop:       func() bool { return exit.Pending != nil },
-		YoliumMode: c.yoliumMode,
+		Provider:            recordingProvider,
+		Model:               c.model,
+		Tools:               allTools,
+		Messages:            messages,
+		MaxTokens:           maxTokens,
+		ContextBudgetTokens: contextWindow,
+		OnMessage:           onMessage,
+		Stop:                func() bool { return exit.Pending != nil },
+		YoliumMode:          c.yoliumMode,
 	})
 
 	// Emit cumulative usage
@@ -638,8 +708,14 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 	// `yolium_complete` would silently mark a failed run as done.
 	if runErr == nil {
 		if summary, ok := readExistingSummary(c.repoPath); ok {
-			yolium.Emit(stdout, yolium.CompleteEvent{Summary: summary})
-			return 0
+			// Dirty-worktree guard: a summary file does not excuse
+			// uncommitted work. Fall through to the honest-error path
+			// instead of fabricating a complete for a stranded run.
+			if !c.yoliumMode || !yolium.WorktreeBlocksComplete(context.Background(), c.repoPath) {
+				yolium.Emit(stdout, yolium.CompleteEvent{Summary: summary})
+				return 0
+			}
+			fmt.Fprintln(stderr, "yoli: summary fallback suppressed: uncommitted changes in worktree")
 		}
 	}
 
@@ -756,8 +832,8 @@ func singleLine(s string) string {
 // exit.Pending for the first terminal event (complete / error /
 // question). Subsequent events in the same message after a terminal one
 // are still re-emitted so progress lines aren't lost.
-func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.ExitSignal) {
-	dispatchEvents(content, stdout, exit, true)
+func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, blockComplete func() bool) {
+	dispatchEvents(content, stdout, exit, true, blockComplete)
 }
 
 // dispatchBashResultEvents scans the stdout of a Bash tool call (the
@@ -769,17 +845,23 @@ func dispatchAssistantEvents(content string, stdout io.Writer, exit *yolium.Exit
 // exists specifically so that a model which insists on using
 // `echo '@@YOLIUM:{"type":"complete",...}'` can still cleanly terminate
 // the loop instead of running until the iteration cap or fallback.
-func dispatchBashResultEvents(content string, stdout io.Writer, exit *yolium.ExitSignal) {
-	dispatchEvents(content, stdout, exit, false)
+func dispatchBashResultEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, blockComplete func() bool) {
+	dispatchEvents(content, stdout, exit, false, blockComplete)
 }
 
 // dispatchEvents is the shared implementation for both assistant-prose
 // and Bash-result scanning. When emitProgress is true, every parsed
 // event is re-emitted on stdout (used for assistant prose). When false,
 // only terminal events are re-emitted (used for Bash results).
-func dispatchEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, emitProgress bool) {
+func dispatchEvents(content string, stdout io.Writer, exit *yolium.ExitSignal, emitProgress bool, blockComplete func() bool) {
 	for _, evt := range yolium.ScanText(content) {
 		kind, summary, message, terminal := yolium.TerminalEvent(evt)
+		if kind == "complete" && blockComplete != nil && blockComplete() {
+			// Dirty-worktree guard: swallow the text-emitted complete
+			// entirely — re-emitting it on stdout would let Yolium's
+			// parser mark the item done while the loop keeps running.
+			continue
+		}
 		if emitProgress || terminal {
 			_ = yolium.Emit(stdout, evt)
 		}

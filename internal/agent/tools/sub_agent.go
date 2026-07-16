@@ -19,9 +19,12 @@ type SubAgentOptions struct {
 	// `<CLIEntry> run --role <role>` with the prompt on stdin, behaves as
 	// a Yoli sub-agent.
 	CLIEntry string
-	// DefaultModel, if non-empty, is exported as OPENROUTER_MODEL in the
-	// child's environment.
-	DefaultModel string
+	// Provider, if non-empty, is passed to the child as --provider so it
+	// activates the same profile as the parent.
+	Provider string
+	// Model, if non-empty, is passed to the child as --model so it uses
+	// the parent's resolved model.
+	Model string
 	// MaxDepth caps recursion. Zero means the default (3).
 	MaxDepth int
 }
@@ -89,8 +92,15 @@ func (t *SubAgentTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 		)
 	}
 
-	cmd := exec.CommandContext(ctx, t.opts.CLIEntry, "run", "--role", args.Role)
-	cmd.Env = childEnv(os.Environ(), depth+1, t.opts.DefaultModel)
+	argv := []string{"run", "--role", args.Role}
+	if t.opts.Provider != "" {
+		argv = append(argv, "--provider", t.opts.Provider)
+	}
+	if t.opts.Model != "" {
+		argv = append(argv, "--model", t.opts.Model)
+	}
+	cmd := exec.CommandContext(ctx, t.opts.CLIEntry, argv...)
+	cmd.Env = childEnv(os.Environ(), depth+1)
 	cmd.Stdin = strings.NewReader(args.Prompt)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -112,31 +122,19 @@ func (t *SubAgentTool) Run(ctx context.Context, raw json.RawMessage) (string, er
 	return stdout.String(), nil
 }
 
-// childEnv returns a copy of parent with YOLI_SUBAGENT_DEPTH set to depth
-// and (if non-empty) OPENROUTER_MODEL set to model. Existing entries with
-// these keys are overridden.
-func childEnv(parent []string, depth int, model string) []string {
-	out := make([]string, 0, len(parent)+2)
-	skip := map[string]bool{"YOLI_SUBAGENT_DEPTH": true}
-	if model != "" {
-		skip["OPENROUTER_MODEL"] = true
-	}
+// childEnv returns a copy of parent with YOLI_SUBAGENT_DEPTH set to
+// depth. The depth counter is process plumbing for the recursion guard,
+// not a setting; all settings reach the child via its config file and
+// the --provider/--model flags.
+func childEnv(parent []string, depth int) []string {
+	out := make([]string, 0, len(parent)+1)
 	for _, kv := range parent {
-		eq := strings.IndexByte(kv, '=')
-		if eq < 0 {
-			out = append(out, kv)
-			continue
-		}
-		if skip[kv[:eq]] {
+		if strings.HasPrefix(kv, "YOLI_SUBAGENT_DEPTH=") {
 			continue
 		}
 		out = append(out, kv)
 	}
-	out = append(out, "YOLI_SUBAGENT_DEPTH="+strconv.Itoa(depth))
-	if model != "" {
-		out = append(out, "OPENROUTER_MODEL="+model)
-	}
-	return out
+	return append(out, "YOLI_SUBAGENT_DEPTH="+strconv.Itoa(depth))
 }
 
 var _ Tool = (*SubAgentTool)(nil)

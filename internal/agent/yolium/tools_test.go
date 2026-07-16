@@ -18,9 +18,17 @@ func (c *captureSink) Emit(e Event) error {
 	return nil
 }
 
+// findTool builds the tool set against a plain temp dir (not a git
+// repo), which also pins the guard's fail-open rule: completion in a
+// non-git working directory is never blocked.
 func findTool(t *testing.T, name string, sink EventSink, exit *ExitSignal) *yoliumTool {
 	t.Helper()
-	for _, tool := range NewTools(sink, exit) {
+	return findToolIn(t, t.TempDir(), name, sink, exit)
+}
+
+func findToolIn(t *testing.T, repoPath, name string, sink EventSink, exit *ExitSignal) *yoliumTool {
+	t.Helper()
+	for _, tool := range NewTools(sink, exit, repoPath) {
 		yt, ok := tool.(*yoliumTool)
 		if !ok {
 			continue
@@ -34,7 +42,7 @@ func findTool(t *testing.T, name string, sink EventSink, exit *ExitSignal) *yoli
 }
 
 func TestNewTools_RegistersExpectedNames(t *testing.T) {
-	tools := NewTools(NopSink(), NewExitSignal())
+	tools := NewTools(NopSink(), NewExitSignal(), t.TempDir())
 	want := []string{
 		ToolComplete, ToolError, ToolAskQuestion,
 		ToolProgress, ToolAddComment, ToolComment,
@@ -238,6 +246,112 @@ func TestStartAgentTool_RequiresIDAndName(t *testing.T) {
 	ev := sink.events[0].(StartAgentEvent)
 	if ev.ItemID != "i" || ev.AgentName != "code-agent" || ev.Goal != "g" || ev.AgentProvider != "yoli" {
 		t.Fatalf("event=%+v", ev)
+	}
+}
+
+func TestCompleteTool_DirtyWorktreeRejected(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+	writeFile(t, root, "work.go", "package work\n")
+
+	sink := &captureSink{}
+	exit := NewExitSignal()
+	tool := findToolIn(t, root, ToolComplete, sink, exit)
+
+	_, err := tool.Run(context.Background(), json.RawMessage(`{"summary":"done"}`))
+	if err == nil {
+		t.Fatal("expected rejection for dirty worktree")
+	}
+	if !strings.Contains(err.Error(), "work.go") {
+		t.Errorf("rejection must name the offending file: %v", err)
+	}
+	if exit.Pending != nil {
+		t.Fatalf("rejected complete must not set exit.Pending: %+v", exit.Pending)
+	}
+	if len(sink.events) != 0 {
+		t.Fatalf("rejected complete must not emit events: %v", sink.events)
+	}
+}
+
+func TestCompleteTool_CleanWorktreeCompletes(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+
+	sink := &captureSink{}
+	exit := NewExitSignal()
+	tool := findToolIn(t, root, ToolComplete, sink, exit)
+
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"summary":"done"}`)); err != nil {
+		t.Fatalf("clean repo must complete: %v", err)
+	}
+	if exit.Pending == nil || exit.Pending.Kind != ExitPendingComplete {
+		t.Fatalf("exit.Pending=%+v", exit.Pending)
+	}
+}
+
+func TestCompleteTool_HarnessNoiseDoesNotBlock(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+	// AGENTS.md is tracked, then clobbered — as Yolium's container
+	// entrypoint does at every start.
+	writeFile(t, root, "AGENTS.md", "# canonical\n")
+	gitInRepo(t, root, "add", "AGENTS.md")
+	gitInRepo(t, root, "commit", "-q", "-m", "add AGENTS.md")
+	writeFile(t, root, "AGENTS.md", "# Yolium Container Environment\n")
+	writeFile(t, root, ".yolium/summary.md", "s\n")
+	writeFile(t, root, ".yolium-code-agent-instructions.md", "i\n")
+
+	tool := findToolIn(t, root, ToolComplete, &captureSink{}, NewExitSignal())
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"summary":"done"}`)); err != nil {
+		t.Fatalf("harness-only dirt must not block completion: %v", err)
+	}
+}
+
+func TestCompleteTool_GuardKillSwitch(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+	writeFile(t, root, "work.go", "package work\n")
+	t.Setenv("YOLI_COMPLETE_GUARD", "off")
+
+	tool := findToolIn(t, root, ToolComplete, &captureSink{}, NewExitSignal())
+	if _, err := tool.Run(context.Background(), json.RawMessage(`{"summary":"done"}`)); err != nil {
+		t.Fatalf("YOLI_COMPLETE_GUARD=off must disable the guard: %v", err)
+	}
+}
+
+func TestCompleteTool_VerdictBypassesGuard(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+	writeFile(t, root, "artifact.log", "verify-agent test run leftovers\n")
+
+	tool := findToolIn(t, root, ToolComplete, &captureSink{}, NewExitSignal())
+	raw := json.RawMessage(`{"summary":"ok","verdict":"approved"}`)
+	if _, err := tool.Run(context.Background(), raw); err != nil {
+		t.Fatalf("verdict calls must bypass the guard: %v", err)
+	}
+}
+
+func TestErrorAndAskQuestion_UnguardedInDirtyRepo(t *testing.T) {
+	root := t.TempDir()
+	initGuardGitRepo(t, root)
+	writeFile(t, root, "work.go", "package work\n")
+
+	exit := NewExitSignal()
+	errTool := findToolIn(t, root, ToolError, &captureSink{}, exit)
+	if _, err := errTool.Run(context.Background(), json.RawMessage(`{"message":"boom"}`)); err != nil {
+		t.Fatalf("yolium_error must never be blocked: %v", err)
+	}
+	if exit.Pending == nil || exit.Pending.Kind != ExitPendingError {
+		t.Fatalf("exit.Pending=%+v", exit.Pending)
+	}
+
+	exit = NewExitSignal()
+	askTool := findToolIn(t, root, ToolAskQuestion, &captureSink{}, exit)
+	if _, err := askTool.Run(context.Background(), json.RawMessage(`{"text":"which?"}`)); err != nil {
+		t.Fatalf("yolium_ask_question must never be blocked: %v", err)
+	}
+	if exit.Pending == nil || exit.Pending.Kind != ExitPendingQuestion {
+		t.Fatalf("exit.Pending=%+v", exit.Pending)
 	}
 }
 

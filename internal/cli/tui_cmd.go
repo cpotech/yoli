@@ -15,9 +15,9 @@ import (
 
 	"yoli/internal/agent"
 	agentsession "yoli/internal/agent/session"
+	"yoli/internal/agent/skills"
 	"yoli/internal/agent/tools"
 	"yoli/internal/ai"
-	"yoli/internal/ai/providers"
 )
 
 const tuiUsage = "Usage: yoli tui [--loglevel debug|info|error|none] [session options]\n" +
@@ -26,12 +26,15 @@ const tuiUsage = "Usage: yoli tui [--loglevel debug|info|error|none] [session op
 const (
 	ansiDim   = "\x1b[2m"
 	ansiRed   = "\x1b[31m"
+	ansiGreen = "\x1b[32m"
 	ansiReset = "\x1b[0m"
 )
 
 const tuiHelp = `commands:
   /help            show this list
   /model [slug]    show or switch the model
+  /provider [name] show or switch the provider profile
+  /skill [name|off] show, set, or clear the active skill (Shift-Tab cycles)
   /context         show estimated context size
   /clear           start a new session
   /exit, /quit     leave the REPL (or Ctrl-D)`
@@ -55,6 +58,67 @@ type tuiLoopConfig struct {
 	// handleSignals enables per-turn SIGINT handling so Ctrl-C cancels
 	// the in-flight turn instead of killing the REPL. Off in tests.
 	handleSignals bool
+	// contextWindow is the total context window (input + output) and
+	// maxTokens the per-turn output cap, resolved once at startup so the
+	// Run call and /context agree. Zero falls back to the agent defaults.
+	contextWindow int
+	maxTokens     int
+	// skillList is advertised in the system prompt; loaded once at
+	// startup by the caller so the loop stays env-free.
+	skillList []skills.LoadedSkill
+	// activeSkill is the skill whose body is appended to the system
+	// prompt each turn ("" = none). Cycled with Shift-Tab or /skill.
+	activeSkill string
+	// profiles holds the named provider profiles loaded at startup;
+	// profileName is the active one. Switched with /provider.
+	profiles    ProviderProfiles
+	profileName string
+}
+
+// cycleSkill advances the active skill through none → first → … → last
+// → none, returning the new active skill name ("" = none).
+func cycleSkill(current string, skillList []skills.LoadedSkill) string {
+	if len(skillList) == 0 {
+		return ""
+	}
+	if current == "" {
+		return skillList[0].Name
+	}
+	for i := range skillList {
+		if skillList[i].Name == current {
+			if i+1 < len(skillList) {
+				return skillList[i+1].Name
+			}
+			return ""
+		}
+	}
+	// Unknown current (e.g. stale name): reset to none.
+	return ""
+}
+
+// tuiPromptPrefix renders the REPL prompt, showing the active skill so
+// the Shift-Tab state is always visible.
+func tuiPromptPrefix(activeSkill string) string {
+	if activeSkill == "" {
+		return "> "
+	}
+	return "[" + activeSkill + "] > "
+}
+
+// tuiSystemWithSkill appends the active skill's expanded body to the
+// base system prompt. Expansion failures warn and fall back to base so
+// a broken skill never blocks the turn.
+func tuiSystemWithSkill(base string, c *tuiLoopConfig, warn io.Writer) string {
+	if c.activeSkill == "" {
+		return base
+	}
+	body, err := skills.Expand(c.activeSkill, c.skillList)
+	if err != nil {
+		fmt.Fprintf(warn, "skill %s: %v\n", c.activeSkill, err)
+		return base
+	}
+	return base + "\n\n## Active Skill: " + c.activeSkill +
+		"\n\nThe user activated this skill for the current task. Adopt these instructions:\n\n" + body
 }
 
 // tuiIsTerminal reports whether f is a character device (a terminal).
@@ -126,6 +190,7 @@ func (s *tuiSpinner) Stop() {
 // tuiLineEditor provides a line editing interface with:
 //   - Up/Down arrows to navigate prompt history
 //   - Left/Right arrows to move cursor within the current prompt
+//   - Shift-Tab to cycle the active skill (via onShiftTab)
 //   - Backspace/Delete to edit
 //   - Enter to submit
 //
@@ -137,7 +202,16 @@ type tuiLineEditor struct {
 	histIdx int           // current position in history (-1 = new prompt)
 	prompt  string        // current input buffer (may contain '\n' from paste)
 	cursor  int           // cursor position within prompt (0 = beginning)
-	curRow  int           // visual row of the cursor within the rendered buffer
+	curRow  int           // visual (wrapped) row of the cursor within the rendered buffer
+	width   int           // terminal width in columns (>=1); 0 means "unknown"
+	prefix  string        // prompt prefix rendered before the first row
+	// color paints the typed buffer green so the user's own comments
+	// stand out from assistant/tool output in the scrollback. Gated on
+	// stderr (where the editor echoes) being a color terminal.
+	color bool
+	// onShiftTab, when non-nil, fires on Shift-Tab (CSI Z) and returns
+	// the new prompt prefix; the in-progress input is preserved.
+	onShiftTab func() string
 }
 
 // newTUILineEditor creates a line editor if stdin is a terminal.
@@ -155,6 +229,7 @@ func newTUILineEditor(stdin *os.File, stdout io.Writer) *tuiLineEditor {
 		histIdx: -1,
 		prompt:  "",
 		cursor:  0,
+		prefix:  "> ",
 	}
 }
 
@@ -186,6 +261,15 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 		return "", false, err
 	}
 	defer term.Restore(e.stdin, prev)
+
+	// Resolve the terminal width so redrawLine can account for line
+	// wrapping. If it can't be measured we fall back to a wide value so
+	// wrapping math never divides by zero or underestimates.
+	if w, _, err := term.GetSize(e.stdin); err == nil && w > 0 {
+		e.width = w
+	} else {
+		e.width = 0
+	}
 
 	// Enable bracketed paste so the terminal wraps pasted text in
 	// ESC[200~ … ESC[201~. Without this, embedded newlines arrive as bare
@@ -264,6 +348,11 @@ func (e *tuiLineEditor) readLine() (string, bool, error) {
 			case 'D': // Left arrow
 				if e.cursor > 0 {
 					e.cursor--
+					e.redrawLine()
+				}
+			case 'Z': // Shift-Tab
+				if e.onShiftTab != nil {
+					e.prefix = e.onShiftTab()
 					e.redrawLine()
 				}
 			default:
@@ -391,45 +480,96 @@ func (e *tuiLineEditor) insertPaste() {
 	e.redrawLine()
 }
 
+// visualRowCount returns how many visual (wrapped) rows a logical line of
+// the given on-screen column length occupies. A line of L columns wraps
+// onto 1 + floor((L-1)/width) rows once it exceeds the terminal width; an
+// empty line (L<=0) still takes one row on screen. When width is unknown
+// (<=0, e.g. redraw before the terminal size is measured) we assume no
+// wrapping and report a single row.
+func visualRowCount(screenLen, width int) int {
+	if width <= 0 {
+		return 1
+	}
+	if screenLen <= 0 {
+		return 1
+	}
+	return 1 + (screenLen-1)/width
+}
+
+// screenLen returns the on-screen column length of the logical line at
+// index i, adding the prompt prefix width for the first line (i == 0).
+func (e *tuiLineEditor) screenLen(lines []string, i int) int {
+	l := len(lines[i])
+	if i == 0 {
+		l += len(e.prefix)
+	}
+	return l
+}
+
 // redrawLine redraws the current buffer, which may span multiple rows when
-// it contains newlines from a paste. It assumes no single logical line
-// exceeds the terminal width (line wrapping is not accounted for).
+// it contains newlines from a paste, and crucially when a single logical
+// line is wider than the terminal and the terminal wraps it onto several
+// visual rows. The cursor's vertical position is tracked in *visual* rows
+// (accounting for wrapping), not logical lines, so the stale wrapped rows
+// from the previous draw are always cleared — otherwise the freshly drawn
+// buffer overlapped the leftover text and the line appeared duplicated.
 func (e *tuiLineEditor) redrawLine() {
-	// Return to the first rendered row, then clear it and everything below.
+	lines := strings.Split(e.prompt, "\n")
+	width := e.width
+
+	// Total visual rows the buffer currently occupies on screen.
+	totalRows := 0
+	for i := range lines {
+		totalRows += visualRowCount(e.screenLen(lines, i), width)
+	}
+
+	// Return to the first rendered row (the cursor was left at the end of
+	// the last visual row), then clear it and everything below.
 	if e.curRow > 0 {
 		fmt.Fprintf(e.stdout, "\x1b[%dA", e.curRow)
 	}
 	e.stdout.WriteString("\r\x1b[J")
 
-	// Print the buffer, prefixing the first row with "> " and breaking
-	// rows with CRLF (raw mode needs the explicit carriage return).
-	lines := strings.Split(e.prompt, "\n")
+	// Print the buffer, prefixing the first row with the prompt prefix
+	// and breaking rows with CRLF (raw mode needs the explicit carriage
+	// return).
 	for i, ln := range lines {
 		if i == 0 {
-			e.stdout.WriteString("> " + ln)
+			e.stdout.WriteString(e.prefix + tuiPaint(ln, ansiGreen, e.color))
 		} else {
-			e.stdout.WriteString("\r\n" + ln)
+			e.stdout.WriteString("\r\n" + tuiPaint(ln, ansiGreen, e.color))
 		}
 	}
 
-	// Locate the cursor's target row/column from its byte offset.
+	// Locate the cursor's target visual row/column from its byte offset.
 	before := e.prompt[:e.cursor]
-	targetRow := strings.Count(before, "\n")
-	col := len(before) - (strings.LastIndexByte(before, '\n') + 1)
-	if targetRow == 0 {
-		col += 2 // account for the "> " prefix
+	targetLogical := strings.Count(before, "\n")
+	colInLine := len(before) - (strings.LastIndexByte(before, '\n') + 1)
+	screenCol := colInLine
+	if targetLogical == 0 {
+		screenCol += len(e.prefix)
 	}
+	// Walk the logical lines before the cursor line, accumulating their
+	// visual-row height, then add the cursor's sub-row within its line.
+	cursorRow := 0
+	for i := 0; i < targetLogical; i++ {
+		cursorRow += visualRowCount(e.screenLen(lines, i), width)
+	}
+	cursorRow += screenCol / max(width, 1)
 
-	// The cursor currently sits at the end of the last row; move it to the
-	// target position.
-	if up := (len(lines) - 1) - targetRow; up > 0 {
+	// The cursor currently sits at the end of the last visual row; move it
+	// up to the target position. cursorRow is bounded by totalRows-1, so
+	// this is never negative.
+	if up := (totalRows - 1) - cursorRow; up > 0 {
 		fmt.Fprintf(e.stdout, "\x1b[%dA", up)
 	}
 	e.stdout.WriteString("\r")
-	if col > 0 {
-		fmt.Fprintf(e.stdout, "\x1b[%dC", col)
+	if width > 0 {
+		if col := screenCol % width; col > 0 {
+			fmt.Fprintf(e.stdout, "\x1b[%dC", col)
+		}
 	}
-	e.curRow = targetRow
+	e.curRow = totalRows - 1
 	e.stdout.Flush()
 }
 
@@ -456,20 +596,21 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	ApplyEnvDefaults(cfg)
-	if os.Getenv("OPENROUTER_API_KEY") == "" {
-		fmt.Fprint(stderr, "Error: OPENROUTER_API_KEY is not set\n")
+	profiles, err := LoadProviderProfiles(LoadOptions{
+		PathOptions: PathOptionsFromEnv(),
+		Warnings:    stderr,
+	})
+	if err != nil {
+		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	model := os.Getenv("OPENROUTER_MODEL")
-	if model == "" {
-		model = defaultModel
+	prof, profileName, err := selectProviderProfile(cfg, profiles, flags.Provider)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
-	provider, err := providers.NewOpenRouterProvider(providers.OpenRouterOptions{
-		APIKey:  os.Getenv("OPENROUTER_API_KEY"),
-		Referer: "https://github.com/yolium/yoli",
-		Title:   "Yoli",
-	})
+	model := prof.Model
+	provider, err := newProviderFromProfile(prof, "Yoli")
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -477,24 +618,35 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 	cwd, _ := os.Getwd()
 	exe, _ := os.Executable()
 	toolset := append(
-		tools.DefaultTools(cwd),
-		// Note: the sub-agent tool captures the startup model; /model
-		// switches the REPL's chat model only.
+		tools.DefaultTools(cwd, cfg["BRAVE_API_KEY"]),
+		// Note: the sub-agent tool captures the startup provider and
+		// model; /provider and /model switch the REPL's chat only.
 		tools.NewSubAgentTool(tools.SubAgentOptions{
-			CLIEntry:     exe,
-			DefaultModel: model,
+			CLIEntry: exe,
+			Provider: profileName,
+			Model:    model,
 		}),
 	)
+	skillList := loadSkillsForPrompt(stderr)
+	if len(skillList) > 0 {
+		toolset = append(toolset, tools.NewSkillTool(skillList))
+	}
 	sess, err := resolveChatSession(flags, cwd, in)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	contextWindow, maxTokens := contextLimits(prof)
 	return runTUILoop(tuiLoopConfig{
-		provider: provider,
-		model:    model,
-		tools:    toolset,
-		sess:     sess,
+		provider:      provider,
+		model:         model,
+		tools:         toolset,
+		sess:          sess,
+		contextWindow: contextWindow,
+		maxTokens:     maxTokens,
+		skillList:     skillList,
+		profiles:      profiles,
+		profileName:   profileName,
 		newSession: func() (*agentsession.Session, error) {
 			opts := agentsession.Options{RootDir: flags.SessionRoot, Cwd: cwd}
 			if flags.NoSession {
@@ -511,15 +663,26 @@ func runTUI(args []string, in io.Reader, stdout, stderr io.Writer) int {
 // runTUILoop is the REPL proper: read a line, handle slash commands, or
 // run one agent turn. Provider-agnostic and fully testable.
 func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
-	system := chatSystem
+	baseSystem := chatSystemPrompt(c.skillList)
 	if c.interactive {
-		fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
+		if c.profileName != "" {
+			fmt.Fprintf(stderr, "yoli tui — provider=%s model=%s session=%s (/help for commands)\n", c.profileName, c.model, c.sess.GetSessionID())
+		} else {
+			fmt.Fprintf(stderr, "yoli tui — model=%s session=%s (/help for commands)\n", c.model, c.sess.GetSessionID())
+		}
 	}
 
 	// Create line editor for interactive mode (terminal)
 	var editor *tuiLineEditor
 	if c.interactive && tuiIsTerminal(os.Stdin) {
 		editor = newTUILineEditor(os.Stdin, stderr)
+		editor.color = tuiColorEnabled(os.Stderr)
+	}
+	if editor != nil {
+		editor.onShiftTab = func() string {
+			c.activeSkill = cycleSkill(c.activeSkill, c.skillList)
+			return tuiPromptPrefix(c.activeSkill)
+		}
 	}
 
 	// Create bufio reader for non-interactive mode (scripted input)
@@ -567,13 +730,16 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 
 	for {
 		if c.interactive {
-			fmt.Fprint(stderr, "> ")
+			fmt.Fprint(stderr, tuiPromptPrefix(c.activeSkill))
 		}
 
 		var line string
 		var atEOF bool
 
 		if editor != nil {
+			// Keep the editor's redraw prefix in sync with the /skill
+			// command, which can change the active skill between reads.
+			editor.prefix = tuiPromptPrefix(c.activeSkill)
 			// Use the line editor with history and cursor support
 			result, eof, err := editor.readLine()
 			if err != nil && err != io.EOF {
@@ -600,7 +766,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 		}
 
 		if strings.HasPrefix(line, "/") {
-			if quit := tuiSlashCommand(&c, line, system, stdout, stderr); quit {
+			if quit := tuiSlashCommand(&c, line, baseSystem, stdout, stderr); quit {
 				return 0
 			}
 			if atEOF {
@@ -614,6 +780,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			continue
 		}
+		system := tuiSystemWithSkill(baseSystem, &c, stderr)
 		seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 		seed = append(seed, c.sess.BuildMessages()...)
 
@@ -634,11 +801,13 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 			sp = startTUISpinner(stderr)
 		}
 		_, runErr := agent.Run(ctx, agent.RunOptions{
-			Provider:  c.provider,
-			Model:     c.model,
-			Tools:     c.tools,
-			Messages:  seed,
-			OnMessage: render,
+			Provider:            c.provider,
+			Model:               c.model,
+			Tools:               c.tools,
+			Messages:            seed,
+			MaxTokens:           c.maxTokens,
+			ContextBudgetTokens: c.contextWindow,
+			OnMessage:           render,
 		})
 		sp.Stop()
 		sp = nil
@@ -662,8 +831,9 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 }
 
 // tuiSlashCommand handles a "/..." line. It returns true when the REPL
-// should exit. It may swap c.sess (/clear) or c.model (/model).
-func tuiSlashCommand(c *tuiLoopConfig, line, system string, stdout, stderr io.Writer) bool {
+// should exit. It may swap c.sess (/clear), c.model (/model),
+// c.activeSkill (/skill), or c.provider and its limits (/provider).
+func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr io.Writer) bool {
 	fields := strings.Fields(line)
 	cmd, args := fields[0], fields[1:]
 	switch cmd {
@@ -686,10 +856,79 @@ func tuiSlashCommand(c *tuiLoopConfig, line, system string, stdout, stderr io.Wr
 		}
 		c.model = args[0]
 		fmt.Fprintf(stdout, "model set to %s\n", c.model)
+	case "/provider":
+		if len(args) == 0 {
+			fmt.Fprintf(stdout, "provider: %s\n", c.profileName)
+			for _, name := range profileNames(c.profiles) {
+				p := c.profiles[name]
+				marker := ""
+				if name == c.profileName {
+					marker = " *"
+				}
+				model := p.Model
+				if model == "" {
+					model = "(unset)"
+				}
+				fmt.Fprintf(stdout, "  %s: base_url=%s model=%s%s\n", name, p.BaseURL, model, marker)
+			}
+			return false
+		}
+		name := args[0]
+		prof, ok := c.profiles[name]
+		if !ok {
+			fmt.Fprintf(stderr, "unknown provider profile: %s\n", name)
+			return false
+		}
+		newProv, err := newProviderFromProfile(prof, "Yoli")
+		if err != nil {
+			fmt.Fprintf(stderr, "provider %s: %v\n", name, err)
+			return false
+		}
+		c.provider = newProv
+		c.profileName = name
+		if prof.Model != "" {
+			c.model = prof.Model
+		}
+		c.contextWindow, c.maxTokens = contextLimits(prof)
+		fmt.Fprintf(stdout, "provider set to %s (model: %s)\n", name, c.model)
+	case "/skill":
+		if len(args) == 0 {
+			active := c.activeSkill
+			if active == "" {
+				active = "none"
+			}
+			fmt.Fprintf(stdout, "skill: %s\n", active)
+			if len(c.skillList) > 0 {
+				names := make([]string, len(c.skillList))
+				for i, s := range c.skillList {
+					names[i] = s.Name
+				}
+				fmt.Fprintf(stdout, "available: %s\n", strings.Join(names, ", "))
+			}
+			return false
+		}
+		if args[0] == "off" || args[0] == "none" {
+			c.activeSkill = ""
+			fmt.Fprintln(stdout, "skill cleared")
+			return false
+		}
+		for _, s := range c.skillList {
+			if s.Name == args[0] {
+				c.activeSkill = s.Name
+				fmt.Fprintf(stdout, "skill set to %s\n", s.Name)
+				return false
+			}
+		}
+		fmt.Fprintf(stderr, "unknown skill: %s\n", args[0])
 	case "/context":
+		system := tuiSystemWithSkill(baseSystem, c, stderr)
 		seed := []ai.Message{{Role: ai.RoleSystem, Content: &system}}
 		seed = append(seed, c.sess.BuildMessages()...)
-		fmt.Fprintf(stdout, "context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), agent.DefaultContextBudget))
+		window := c.contextWindow
+		if window <= 0 {
+			window = agent.DefaultContextBudget
+		}
+		fmt.Fprintf(stdout, "context-size: %s\n", formatContextSize(agent.EstimateContextTokens(seed), window))
 	default:
 		fmt.Fprintf(stdout, "unknown command %s — try /help\n", cmd)
 	}

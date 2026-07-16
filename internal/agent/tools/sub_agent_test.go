@@ -42,8 +42,8 @@ func runDumperHelper() {
 		"args":       os.Args[1:],
 		"env": map[string]any{
 			"YOLI_SUBAGENT_DEPTH": envOrNil("YOLI_SUBAGENT_DEPTH"),
-			"OPENROUTER_API_KEY":  envOrNil("OPENROUTER_API_KEY"),
-			"OPENROUTER_MODEL":    envOrNil("OPENROUTER_MODEL"),
+			"YOLI_API_KEY":        envOrNil("YOLI_API_KEY"),
+			"YOLI_MODEL":          envOrNil("YOLI_MODEL"),
 		},
 		"stdin": string(buf),
 	}
@@ -163,11 +163,11 @@ func TestSubAgent_IncludesStderrOnNonZeroExit(t *testing.T) {
 }
 
 func TestSubAgent_InheritsOpenRouterAPIKey(t *testing.T) {
-	t.Setenv("OPENROUTER_API_KEY", "sk-test-abc")
+	t.Setenv("YOLI_API_KEY", "sk-test-abc")
 	t.Setenv("YOLI_SUBAGENT_DEPTH", "")
 	d := runDumper(t, SubAgentOptions{}, "coder", "x")
-	if d.Env["OPENROUTER_API_KEY"] != "sk-test-abc" {
-		t.Fatalf("api key = %v", d.Env["OPENROUTER_API_KEY"])
+	if d.Env["YOLI_API_KEY"] != "sk-test-abc" {
+		t.Fatalf("api key = %v", d.Env["YOLI_API_KEY"])
 	}
 }
 
@@ -202,11 +202,15 @@ func TestSubAgent_ThrowsAtMaxDepth(t *testing.T) {
 	}
 }
 
-func TestSubAgent_DefaultModelExportsOpenRouterModel(t *testing.T) {
+func TestSubAgent_PassesProviderAndModelFlags(t *testing.T) {
 	t.Setenv("YOLI_SUBAGENT_DEPTH", "")
-	d := runDumper(t, SubAgentOptions{DefaultModel: "anthropic/claude-3.5-sonnet"}, "coder", "x")
-	if d.Env["OPENROUTER_MODEL"] != "anthropic/claude-3.5-sonnet" {
-		t.Fatalf("model = %v", d.Env["OPENROUTER_MODEL"])
+	d := runDumper(t, SubAgentOptions{Provider: "openrouter", Model: "anthropic/claude-3.5-sonnet"}, "coder", "x")
+	args := strings.Join(d.Args, " ")
+	if !strings.Contains(args, "--provider openrouter") {
+		t.Fatalf("args missing --provider: %v", d.Args)
+	}
+	if !strings.Contains(args, "--model anthropic/claude-3.5-sonnet") {
+		t.Fatalf("args missing --model: %v", d.Args)
 	}
 }
 

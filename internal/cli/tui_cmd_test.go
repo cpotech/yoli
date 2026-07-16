@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -125,7 +126,7 @@ func TestTUI_ToolCallAndResultRendered(t *testing.T) {
 		{Content: strptr("done")},
 	})
 	c := newTUITestConfig(faux)
-	c.tools = tools.DefaultTools(t.TempDir())
+	c.tools = tools.DefaultTools(t.TempDir(), "")
 	code, stdout, _ := runTUITest(t, c, "list go files\n/exit\n")
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
@@ -167,6 +168,129 @@ func TestTUI_NoANSIWhenColorDisabled(t *testing.T) {
 	}
 	if strings.Contains(stdout, "\x1b[") || strings.Contains(stderr, "\x1b[") {
 		t.Fatalf("ANSI escapes in non-color output: stdout=%q stderr=%q", stdout, stderr)
+	}
+}
+
+func TestTUIEditor_UserInputGreenWhenColorEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	e := &tuiLineEditor{stdout: bufio.NewWriter(&buf), prefix: "> ", color: true, prompt: "hello", cursor: 5}
+	e.redrawLine()
+	if !strings.Contains(buf.String(), ansiGreen) {
+		t.Fatalf("no green ANSI marker for user input: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Fatalf("missing user input text: %q", buf.String())
+	}
+}
+
+func TestTUIEditor_UserInputPlainWhenColorDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	e := &tuiLineEditor{stdout: bufio.NewWriter(&buf), prefix: "> ", color: false, prompt: "hello", cursor: 5}
+	e.redrawLine()
+	if strings.Contains(buf.String(), ansiGreen) {
+		t.Fatalf("unexpected green ANSI marker with color off: %q", buf.String())
+	}
+	if !strings.Contains(buf.String(), "hello") {
+		t.Fatalf("missing user input text: %q", buf.String())
+	}
+}
+
+// TestTUIEditor_WrappedLineClearsAllRows is the regression test for the
+// "wrapped line duplicates on the next redraw" bug. A single logical line
+// wider than the terminal wraps onto multiple visual rows; redrawLine must
+// move the cursor up by the full visual-row count (not just the logical
+// line count) so that \r\x1b[J clears every wrapped row. Otherwise the
+// stale upper rows remain and the redrawn text overlaps them, looking
+// duplicated.
+func TestTUIEditor_WrappedLineClearsAllRows(t *testing.T) {
+	// 40-column terminal; a 100-char line wraps onto 3 visual rows.
+	const width = 40
+	prefix := "> "
+	long := strings.Repeat("x", 100)
+	e := &tuiLineEditor{
+		stdout: bufio.NewWriter(io.Discard),
+		prefix: prefix,
+		width:  width,
+		prompt: long,
+		cursor: len(long),
+	}
+
+	// After the first draw curRow records how many visual rows the buffer
+	// occupies minus one. 100 chars + 2-char prefix, width 40:
+	// ceil(102/40) = 3 rows => curRow should be 2.
+	e.redrawLine()
+	if e.curRow != 2 {
+		t.Fatalf("first draw curRow = %d, want 2 (3 wrapped rows)", e.curRow)
+	}
+
+	// Simulate the cursor sitting at the end of the last visual row, then
+	// a second redraw (e.g. the next keystroke) must move UP by curRow
+	// rows before clearing. Capture the emitted escape sequences.
+	var buf bytes.Buffer
+	e.stdout = bufio.NewWriter(&buf)
+	e.curRow = 2 // cursor left at bottom visual row from prior draw
+	e.redrawLine()
+	out := buf.String()
+
+	// Must move up the full 2 rows before clearing, so "\x1b[2A\r\x1b[J".
+	if !strings.Contains(out, "\x1b[2A") {
+		t.Fatalf("expected move-up of 2 rows before clearing; got %q", out)
+	}
+	if !strings.Contains(out, "\r\x1b[J") {
+		t.Fatalf("expected clear-to-end-of-screen; got %q", out)
+	}
+	// And it must not contain a leftover single-line move-up that would
+	// miss the wrapped rows.
+	if strings.Contains(out, "\x1b[1A") && !strings.Contains(out, "\x1b[2A") {
+		t.Fatalf("moved up only 1 row, missing wrapped rows; got %q", out)
+	}
+}
+
+// TestTUIEditor_VisualRowCount checks the wrapping math used by redrawLine.
+func TestTUIEditor_VisualRowCount(t *testing.T) {
+	cases := []struct {
+		screenLen, width, want int
+	}{
+		{0, 40, 1},   // empty line: one row
+		{1, 40, 1},   // fits
+		{40, 40, 1},  // exactly fills one row
+		{41, 40, 2},  // one char wraps
+		{80, 40, 2},  // exactly two rows
+		{81, 40, 3},  // three rows
+		{100, 40, 3}, // matches the regression scenario
+		{100, 0, 1},  // unknown width: assume no wrap
+	}
+	for _, c := range cases {
+		if got := visualRowCount(c.screenLen, c.width); got != c.want {
+			t.Errorf("visualRowCount(%d,%d) = %d, want %d", c.screenLen, c.width, got, c.want)
+		}
+	}
+}
+
+// TestTUIEditor_CursorSubRowForWrappedLine verifies that, on a wrapped
+// line, the cursor's column is reported modulo the terminal width so it
+// lands on the correct wrapped sub-row rather than the first row.
+func TestTUIEditor_CursorSubRowForWrappedLine(t *testing.T) {
+	const width = 40
+	prefix := "> "
+	e := &tuiLineEditor{
+		stdout: bufio.NewWriter(io.Discard),
+		prefix: prefix,
+		width:  width,
+		prompt: strings.Repeat("x", 100), // 102 cols incl. prefix => 3 rows
+		cursor: 45,                        // 2-char prefix + 43 => col 45 -> 2nd visual row
+	}
+	e.redrawLine()
+	// rows: line0 has 3 visual rows (102 cols). cursor col 45 -> row index
+	// 45/40 == 1, so cursorRow == 1; total rows == 3 => up == 1.
+	if e.curRow != 2 {
+		t.Fatalf("curRow after draw = %d, want 2", e.curRow)
+	}
+	var buf bytes.Buffer
+	e.stdout = bufio.NewWriter(&buf)
+	e.redrawLine()
+	if !strings.Contains(buf.String(), "\x1b[1A") {
+		t.Fatalf("expected move up 1 visual row for cursor on 2nd wrapped sub-row; got %q", buf.String())
 	}
 }
 
@@ -220,7 +344,7 @@ func TestTUI_HelpListsCommandsWithoutProviderCall(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, cmd := range []string{"/help", "/model", "/context", "/clear", "/exit", "/quit"} {
+	for _, cmd := range []string{"/help", "/model", "/provider", "/context", "/clear", "/exit", "/quit"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Fatalf("help output missing %s: %q", cmd, stdout)
 		}
@@ -259,6 +383,81 @@ func TestTUI_ModelCommandWithoutArgPrintsCurrent(t *testing.T) {
 	}
 	if len(rec.reqs) != 0 {
 		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandListsProfilesWithoutAPIKeys(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{
+		"runpod":     {BaseURL: "https://pod/v1", APIKey: "sekret", Model: "m1"},
+		"openrouter": {BaseURL: "https://or/v1", APIKey: "sekret2"},
+	}
+	c.profileName = "runpod"
+	code, stdout, _ := runTUITest(t, c, "/provider\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "provider: runpod") {
+		t.Fatalf("active profile missing: %q", stdout)
+	}
+	if !strings.Contains(stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("runpod line missing star: %q", stdout)
+	}
+	if !strings.Contains(stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
+		t.Fatalf("openrouter line missing: %q", stdout)
+	}
+	if strings.Contains(stdout, "sekret") {
+		t.Fatalf("api key leaked: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandSwitchesProfileAndLimits(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{
+		"other": {BaseURL: "https://other/v1", APIKey: "k", Model: "other/model", ContextWindow: 4096, MaxTokens: 128},
+	}
+	code, stdout, _ := runTUITest(t, c, "/provider other\n/model\n/context\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "provider set to other (model: other/model)") {
+		t.Fatalf("switch confirmation missing: %q", stdout)
+	}
+	if !strings.Contains(stdout, "model: other/model") {
+		t.Fatalf("/model should show profile model: %q", stdout)
+	}
+	if !strings.Contains(stdout, "of 4k") {
+		t.Fatalf("/context should use profile window: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProviderCommandUnknownNameKeepsState(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("ok")},
+	})}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{"real": {BaseURL: "https://r/v1", APIKey: "k"}}
+	code, stdout, stderr := runTUITest(t, c, "/provider nope\nhi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stderr, "unknown provider profile: nope") {
+		t.Fatalf("stderr = %q", stderr)
+	}
+	if strings.Contains(stdout, "provider set to") {
+		t.Fatalf("should not switch: %q", stdout)
+	}
+	// The original (recording) provider still serves the next turn.
+	if len(rec.reqs) != 1 || rec.reqs[0].Model != "test/model" {
+		t.Fatalf("reqs = %+v", rec.reqs)
 	}
 }
 

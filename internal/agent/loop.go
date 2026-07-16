@@ -6,6 +6,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -25,12 +26,17 @@ const DefaultMaxIterations = 64
 
 // RunOptions configures Run.
 type RunOptions struct {
-	Provider            ai.Provider
-	Model               string
-	Tools               []tools.Tool
-	Messages            []ai.Message
-	MaxIterations       int
-	MaxTokens           int
+	Provider      ai.Provider
+	Model         string
+	Tools         []tools.Tool
+	Messages      []ai.Message
+	MaxIterations int
+	MaxTokens     int
+	// ContextBudgetTokens is the TOTAL context window (input + output) the
+	// backend accepts. The loop reserves MaxTokens of output headroom (plus
+	// tool-definition and heuristic margin) out of this window before
+	// compacting input, so input + output stays within the window. Unset
+	// (<= 0) falls back to DefaultContextBudget.
 	ContextBudgetTokens int
 	// OnMessage, if non-nil, is invoked synchronously each time a new
 	// assistant or tool message is appended to the conversation.
@@ -82,10 +88,25 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 		index[def.Name] = t
 	}
 
+	// contextBudget is the TOTAL window (input + output). Reserve output
+	// and tool-definition headroom out of it once so every compaction
+	// targets an input budget that keeps input + MaxTokens within the
+	// window — otherwise the provider rejects the request (e.g. vLLM's
+	// "input N + requested output M > window" HTTP 400).
+	toolDefTokens := estimateToolDefTokens(defs)
+	inputBudget := computeInputBudget(contextBudget, maxTokens, toolDefTokens)
+
+	// estScale corrects the bytes/4 token estimate against reality: it is
+	// recalibrated each turn from the provider's reported prompt tokens,
+	// and tightened harder when a request is rejected for context
+	// overflow. The input budget is divided by it before compaction.
+	estScale := minEstimateScale
+
 	conv := make([]ai.Message, len(opts.Messages))
 	copy(conv, opts.Messages)
 
 	budgetWarned := false
+	abortRetried := false
 	for i := 0; i < max; i++ {
 		// Budget warning: once the loop crosses ~80% of its iteration
 		// cap, inject a one-time heads-up so the model wraps up and
@@ -111,15 +132,66 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 
 		req := ai.ChatRequest{
 			Model:     opts.Model,
-			Messages:  compactConversation(conv, contextBudget),
+			Messages:  compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale)),
 			MaxTokens: maxTokens,
 		}
 		if len(defs) > 0 {
 			req.Tools = defs
 		}
 		resp, err := opts.Provider.Chat(ctx, req)
+		// A context-overflow rejection means the backend counted more
+		// prompt tokens than our estimate budgeted for. Tighten the scale,
+		// recompact, and retry — bounded so a window too small for even
+		// the protected message tail can't retry forever.
+		for retries := 0; err != nil && retries < 2; retries++ {
+			var overflow *ai.ContextOverflowError
+			if !errors.As(err, &overflow) {
+				break
+			}
+			estScale *= overflowScaleStep
+			if estScale > maxOverflowScale {
+				estScale = maxOverflowScale
+			}
+			req.Messages = compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale))
+			resp, err = opts.Provider.Chat(ctx, req)
+		}
 		if err != nil {
 			return conv, err
+		}
+
+		// Calibrate the estimate against the provider's actual count for
+		// the exact messages just sent (plus the tool definitions, which
+		// the server tokenizes as part of the prompt).
+		if resp.Usage != nil && resp.Usage.PromptTokens > 0 {
+			estScale = observedEstimateScale(
+				resp.Usage.PromptTokens,
+				estimateConversationTokens(req.Messages)+toolDefTokens,
+			)
+		}
+
+		// Models that emit tool calls as inline XML (e.g. Qwen3-Coder)
+		// sometimes abort one mid-emission: the content ends with a
+		// dangling `<tool_call>` tag, the server-side parser finds no
+		// complete block, and the response carries no structured tool
+		// calls. Storing that content verbatim poisons the session — the
+		// model imitates the `text… <tool_call> <eos>` pattern from its
+		// own history on every later turn and never calls a tool again.
+		// Strip the fragment before the message is stored or rendered,
+		// and give the model one fresh attempt at the turn since the
+		// aborted response carries no actionable content.
+		aborted := false
+		if resp.Content != nil {
+			var clean string
+			if clean, aborted = stripAbortedToolCallTag(*resp.Content); aborted {
+				resp.Content = &clean
+			}
+		}
+		if aborted && len(resp.ToolCalls) == 0 && !abortRetried {
+			abortRetried = true
+			continue
+		}
+		if !aborted {
+			abortRetried = false
 		}
 
 		assistant := ai.Message{
@@ -148,6 +220,18 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 					sanitized[i].Arguments = "{}"
 					truncated[c.ID] = true
 				}
+			}
+			// finish_reason "length" means the output-token cap cut the
+			// generation mid-emission. Server-side inline-XML parsers
+			// (vLLM + Qwen3-Coder) salvage the cut-off call as a
+			// tool_call with VALID but incomplete arguments — typically
+			// `{}` — which the json.Valid check above cannot catch.
+			// Executing it produces a plausible-looking result that
+			// teaches the model the degenerate call (observed: 54
+			// consecutive `Grep {}` turns). The cap always lands on the
+			// LAST call; earlier calls in the same turn completed first.
+			if resp.FinishReason == "length" {
+				truncated[sanitized[len(sanitized)-1].ID] = true
 			}
 			assistant.ToolCalls = sanitized
 		}
@@ -224,9 +308,9 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 				// with shorter arguments.
 				result = fmt.Sprintf(
 					"Error: arguments for tool %s were truncated mid-response (the model hit its output-token cap "+
-						"before the JSON closed). The call was NOT executed. Retry with shorter arguments — for "+
+						"before the call was fully emitted). The call was NOT executed. Retry with shorter arguments — for "+
 						"Write, emit a smaller file or split the file into multiple Writes; for Edit, make smaller "+
-						"individual edits.",
+						"individual edits; for Grep or Glob, use a short, simple pattern.",
 					call.Name,
 				)
 			} else {
@@ -261,7 +345,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 	// extra round-trip: if it still doesn't terminate — or the provider
 	// errors — we fall through to the original cap error.
 	if opts.YoliumMode {
-		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, contextBudget, max); ok {
+		if conv, ok := flushTerminator(ctx, opts, conv, index, defs, maxTokens, scaleBudget(inputBudget, estScale), max); ok {
 			return conv, nil
 		}
 	}
@@ -281,7 +365,7 @@ func flushTerminator(
 	conv []ai.Message,
 	index map[string]tools.Tool,
 	defs []ai.ToolDefinition,
-	maxTokens, contextBudget, max int,
+	maxTokens, inputBudget, max int,
 ) ([]ai.Message, bool) {
 	flush := fmt.Sprintf(
 		"You have reached the iteration cap (%d turns). This is your FINAL turn. "+
@@ -298,7 +382,7 @@ func flushTerminator(
 
 	req := ai.ChatRequest{
 		Model:     opts.Model,
-		Messages:  compactConversation(conv, contextBudget),
+		Messages:  compactConversation(scrubAbortedToolCallTags(conv), inputBudget),
 		MaxTokens: maxTokens,
 	}
 	if len(defs) > 0 {
@@ -307,6 +391,14 @@ func flushTerminator(
 	resp, err := opts.Provider.Chat(ctx, req)
 	if err != nil {
 		return conv, false
+	}
+
+	// Single-shot wrap-up turn: no retry budget here, but still strip an
+	// aborted `<tool_call>` fragment so it can't be stored in the session.
+	if resp.Content != nil {
+		if clean, aborted := stripAbortedToolCallTag(*resp.Content); aborted {
+			resp.Content = &clean
+		}
 	}
 
 	assistant := ai.Message{Role: ai.RoleAssistant, Content: resp.Content, ToolCalls: resp.ToolCalls}
@@ -350,6 +442,59 @@ const yoliumProtocolMarker = "@@YOLIUM:"
 // in that situation.
 func containsYoliumProtocolText(content string) bool {
 	return strings.Contains(content, yoliumProtocolMarker)
+}
+
+// stripAbortedToolCallTag removes an aborted inline tool-call fragment
+// from assistant content: a `<tool_call>` opening tag with no matching
+// `</tool_call>` after it, plus everything following it (a partial
+// `<function=…` body included). Complete, properly closed blocks are
+// left untouched — those were deliberate text, not an abort. Returns
+// the cleaned content and whether a fragment was stripped.
+func stripAbortedToolCallTag(content string) (string, bool) {
+	const openTag, closeTag = "<tool_call>", "</tool_call>"
+	search := 0
+	for {
+		i := strings.Index(content[search:], openTag)
+		if i < 0 {
+			return content, false
+		}
+		i += search
+		rest := i + len(openTag)
+		j := strings.Index(content[rest:], closeTag)
+		if j < 0 {
+			return strings.TrimRight(content[:i], " \t\r\n"), true
+		}
+		search = rest + j + len(closeTag)
+	}
+}
+
+// scrubAbortedToolCallTags applies stripAbortedToolCallTag to every
+// assistant message before the conversation is sent to the provider.
+// New turns are already sanitized at store time; this pass heals
+// history that predates the sanitizer (e.g. sessions saved by older
+// builds) so a poisoned session recovers on its next turn instead of
+// teaching the model the aborted pattern forever. Copy-on-write: the
+// caller's slice and messages are never mutated.
+func scrubAbortedToolCallTags(conv []ai.Message) []ai.Message {
+	out := conv
+	copied := false
+	for i, m := range conv {
+		if m.Role != ai.RoleAssistant || m.Content == nil {
+			continue
+		}
+		clean, aborted := stripAbortedToolCallTag(*m.Content)
+		if !aborted {
+			continue
+		}
+		if !copied {
+			out = make([]ai.Message, len(conv))
+			copy(out, conv)
+			copied = true
+		}
+		c := clean
+		out[i].Content = &c
+	}
+	return out
 }
 
 func compactConversation(conv []ai.Message, budget int) []ai.Message {
@@ -419,12 +564,67 @@ func runToolCall(ctx context.Context, index map[string]tools.Tool, call ai.ToolC
 			return fmt.Sprintf("Error: invalid JSON arguments for %s: %s", call.Name, err.Error())
 		}
 	}
-	// Normalise camelCase keys (e.g. oldString) to snake_case (old_string)
-	// before dispatch. See tools.NormalizeArgKeys for rationale.
-	args = tools.NormalizeArgKeys(args)
+	// Normalise argument keys toward the property names the tool's own
+	// schema declares (old_string ⇐ oldString for snake_case schemas,
+	// itemId ⇐ item_id for the camelCase yolium_* tools). See
+	// tools.NormalizeArgKeysToSchema for rationale.
+	args = tools.NormalizeArgKeysToSchema(args, tool.Definition())
+	if missing := missingRequiredArgs(tool.Definition(), args); len(missing) > 0 {
+		return fmt.Sprintf(
+			"Error: missing required argument(s) %s for tool %s. The call was NOT executed. "+
+				"Retry the call with every required argument provided.",
+			strings.Join(missing, ", "), call.Name,
+		)
+	}
 	out, err := tool.Run(ctx, args)
 	if err != nil {
 		return fmt.Sprintf("Error running %s: %s", call.Name, err.Error())
 	}
 	return out
+}
+
+// missingRequiredArgs returns the names from the tool schema's `required`
+// list that are absent from args. Weak models — and server-side parsers
+// salvaging an output-cap-truncated call — produce `{}` arguments for
+// tools that require parameters; running those with zero-value defaults
+// yields misleading "successful" results (e.g. an empty Grep pattern
+// matches every file) that teach the model the degenerate call. The
+// `required` value may be []string (Go-native definitions) or []any
+// (definitions that round-tripped through JSON).
+func missingRequiredArgs(def ai.ToolDefinition, args json.RawMessage) []string {
+	required := requiredParamNames(def)
+	if len(required) == 0 {
+		return nil
+	}
+	var provided map[string]json.RawMessage
+	if err := json.Unmarshal(args, &provided); err != nil {
+		// Non-object arguments; leave rejection to the tool itself.
+		return nil
+	}
+	var missing []string
+	for _, name := range required {
+		if _, ok := provided[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
+func requiredParamNames(def ai.ToolDefinition) []string {
+	if def.Parameters == nil {
+		return nil
+	}
+	switch req := def.Parameters["required"].(type) {
+	case []string:
+		return req
+	case []any:
+		out := make([]string, 0, len(req))
+		for _, v := range req {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }

@@ -8,20 +8,20 @@ import (
 	"strings"
 
 	"yoli/internal/agent/skills"
+	builtinskills "yoli/skills"
 )
 
-// ResolvedSkillDirs holds the three directories the skill loader scans.
-// UserDir is empty when no $HOME is available.
+// ResolvedSkillDirs holds the on-disk directories the skill loader
+// scans. UserDir is empty when no $HOME is available. Built-in skills
+// are not directory-based: they ship embedded in the binary.
 type ResolvedSkillDirs struct {
 	ProjectDir string
 	UserDir    string
-	BuiltInDir string
 }
 
 // ResolveSkillDirs returns the canonical skill-directory layout used by
-// the CLI. BuiltInDir is anchored to <dirname(cliEntry)>/../skills so
-// it tracks the binary's installation location.
-func ResolveSkillDirs(cwd, home, cliEntry string) ResolvedSkillDirs {
+// the CLI.
+func ResolveSkillDirs(cwd, home string) ResolvedSkillDirs {
 	var userDir string
 	if home != "" {
 		userDir = filepath.Join(home, ".yoli", "skills")
@@ -29,7 +29,6 @@ func ResolveSkillDirs(cwd, home, cliEntry string) ResolvedSkillDirs {
 	return ResolvedSkillDirs{
 		ProjectDir: filepath.Join(cwd, ".yoli", "skills"),
 		UserDir:    userDir,
-		BuiltInDir: filepath.Join(filepath.Dir(cliEntry), "..", "skills"),
 	}
 }
 
@@ -79,17 +78,24 @@ func loadSkillsFromEnv() ([]skills.LoadedSkill, error) {
 	if err != nil {
 		return nil, err
 	}
-	home := os.Getenv("HOME")
-	exe, err := os.Executable()
-	if err != nil {
-		exe = ""
-	}
-	dirs := ResolveSkillDirs(cwd, home, exe)
+	dirs := ResolveSkillDirs(cwd, os.Getenv("HOME"))
 	return skills.Load(skills.LoadOptions{
 		ProjectDir: dirs.ProjectDir,
 		UserDir:    dirs.UserDir,
-		BuiltInDir: dirs.BuiltInDir,
+		BuiltIn:    builtinskills.FS,
 	})
+}
+
+// loadSkillsForPrompt loads skills for system-prompt injection. Load
+// failures degrade to an empty list with a stderr warning — a broken
+// skills directory must never break the agent.
+func loadSkillsForPrompt(warn io.Writer) []skills.LoadedSkill {
+	list, err := loadSkillsFromEnv()
+	if err != nil {
+		fmt.Fprintf(warn, "yoli: skills: %v (continuing without skills)\n", err)
+		return nil
+	}
+	return list
 }
 
 func runSkillsList(stdout, stderr io.Writer) int {

@@ -68,6 +68,12 @@ type ChatResponse struct {
 	Content   *string
 	ToolCalls []ToolCall
 	Usage     *Usage
+	// FinishReason is the backend's finish_reason for the first choice
+	// ("stop", "tool_calls", "length", ...). Empty when the backend
+	// omits it. "length" means the model hit its output-token cap and
+	// the tail of the generation — including any tool call a server-side
+	// parser salvaged from it — is untrustworthy.
+	FinishReason string
 }
 
 // ChunkType discriminates ChatStreamChunk.
