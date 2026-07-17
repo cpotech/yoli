@@ -35,7 +35,8 @@ file, with three selection surfaces:
 1. `--provider <name>` flag on `chat`, `tui`, `run`, and `agent`.
 2. `default_provider` config key.
 3. `/provider [name]` inside the TUI — lists profiles or switches the
-   endpoint, model, and context limits mid-session.
+   endpoint, model, and context limits mid-session. `/providers` (no
+   argument) lists all profiles without switching.
 
 The flag wins over the config key. Failing to resolve a profile — no
 profiles defined, nothing selected, or an unknown name — is an error.
@@ -45,7 +46,8 @@ callers and tests only.
 ## Storing credentials
 
 Credentials live in the `api_key` field of a provider profile, edited by
-hand in the JSON config file. `yoli config providers` lists profiles
-without printing keys. Shell environment variables are ignored.
+hand in the JSON config file. `yoli provider list` and `yoli config
+providers` list profiles without printing keys. Shell environment
+variables are ignored.
 
 See also [configuration.md](configuration.md).
