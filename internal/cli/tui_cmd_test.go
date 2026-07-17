@@ -344,7 +344,7 @@ func TestTUI_HelpListsCommandsWithoutProviderCall(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, cmd := range []string{"/help", "/model", "/provider", "/context", "/clear", "/exit", "/quit"} {
+	for _, cmd := range []string{"/help", "/model", "/provider", "/providers", "/context", "/clear", "/exit", "/quit"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Fatalf("help output missing %s: %q", cmd, stdout)
 		}
@@ -409,6 +409,52 @@ func TestTUI_ProviderCommandListsProfilesWithoutAPIKeys(t *testing.T) {
 	}
 	if strings.Contains(stdout, "sekret") {
 		t.Fatalf("api key leaked: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProvidersCommandListsProfilesWithoutAPIKeys(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	c.profiles = ProviderProfiles{
+		"runpod":     {BaseURL: "https://pod/v1", APIKey: "sekret", Model: "m1"},
+		"openrouter": {BaseURL: "https://or/v1", APIKey: "sekret2"},
+	}
+	c.profileName = "runpod"
+	code, stdout, _ := runTUITest(t, c, "/providers\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "runpod: base_url=https://pod/v1 model=m1 *") {
+		t.Fatalf("runpod line missing star: %q", stdout)
+	}
+	if !strings.Contains(stdout, "openrouter: base_url=https://or/v1 model=(unset)") {
+		t.Fatalf("openrouter line missing: %q", stdout)
+	}
+	if strings.Contains(stdout, "sekret") {
+		t.Fatalf("api key leaked: %q", stdout)
+	}
+	// /providers is list-only: it must not print the active profile
+	// header that /provider (no arg) emits, nor switch anything.
+	if strings.Contains(stdout, "provider:") || strings.Contains(stdout, "provider set to") {
+		t.Fatalf("unexpected provider header/switch in /providers output: %q", stdout)
+	}
+	if len(rec.reqs) != 0 {
+		t.Fatalf("provider called %d times", len(rec.reqs))
+	}
+}
+
+func TestTUI_ProvidersCommandEmptyPrintsPlaceholder(t *testing.T) {
+	rec := &recordingProvider{inner: providers.NewFauxProvider(nil)}
+	c := newTUITestConfig(rec)
+	code, stdout, _ := runTUITest(t, c, "/providers\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "(no provider profiles defined)") {
+		t.Fatalf("stdout = %q", stdout)
 	}
 	if len(rec.reqs) != 0 {
 		t.Fatalf("provider called %d times", len(rec.reqs))

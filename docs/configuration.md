@@ -65,12 +65,13 @@ A profile is selected with precedence `--provider` flag >
 `default_provider` config key. Failing to resolve a profile — no
 profiles defined, nothing selected, or an unknown name — is an error.
 Inside the TUI, `/provider [name]` lists profiles or switches the
-endpoint, model, and context limits mid-session. Sub-agents inherit the
+endpoint, model, and context limits mid-session. `/providers` lists all
+profiles without switching. Sub-agents inherit the
 parent's active profile and model via `--provider`/`--model` flags on
 the spawned `yoli run` process.
 
-Profiles are edited by hand in the JSON file; `yoli config providers`
-lists them (API keys are never printed).
+Profiles are edited by hand in the JSON file; `yoli provider list` (or
+`yoli config providers`) lists them (API keys are never printed).
 
 ## Working with config from the CLI
 

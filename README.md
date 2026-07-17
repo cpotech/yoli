@@ -67,7 +67,7 @@ internal/
     skills/               # loader, injector, expander
     tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent, Skill
     yolium/               # NDJSON protocol + bridge tools
-  cli/                    # command surface (chat, tui, run, agent, session, skills, config)
+  cli/                    # command surface (chat, tui, run, agent, session, skills, provider, config)
 skills/                   # built-in skills (plan, …), embedded into the binary via go:embed
 ```
 
@@ -91,6 +91,7 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `yoli agent [flags]` | Run the headless agent loop and emit Yolium NDJSON progress/complete events on stdout. |
 | `yoli session list \| current \| tree \| branch` | Inspect and operate on session files. |
 | `yoli skills list` / `show <name>` | Inspect skills available to the agent (see [Skills](#skills)). |
+| `yoli provider list` | List the provider profiles you have configured (see [Providers](#providers)). |
 | `yoli config path` | Print the resolved user config file path. |
 | `yoli config get <key>` | Print the effective value of a known config key. |
 | `yoli config set <key> <value>` | Persist a value into the user config file. |
@@ -163,7 +164,8 @@ variables are not read. See
 Endpoints are named profiles under the `providers` key of the config
 file, selected with `--provider <name>` (on `chat`, `tui`, `run`, and
 `agent`), the `default_provider` config key, or the `/provider` command
-inside the TUI. `yoli config providers` lists the defined profiles.
+inside the TUI (use `/providers` to just list them). `yoli provider list`
+(or `yoli config providers`) lists the defined profiles.
 
 > **Note:** yoli has only been developed and tested on Arch Linux. It should
 > work on other Linux distributions, but those are currently unverified.
