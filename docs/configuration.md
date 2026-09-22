@@ -57,6 +57,7 @@ Profile fields:
 | `model` | Model identifier sent to the backend verbatim. |
 | `context_window` | Total context window in tokens (input + output) the backend accepts, as a JSON number. Set this to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom before compacting input. Defaults to 180000. |
 | `max_tokens` | Per-turn output-token cap, as a JSON number (default 8192). Lower it to leave more of the window for input. |
+| `include_reasoning` | When `true`, ask the backend to report the model's chain-of-thought separately from its answer so yoli can show what the agent is thinking (see [Reasoning](#reasoning-thinking)). Default `false`. |
 
 Profiles work in both the user config and the project `.yolirc.json`; a
 project profile replaces a same-named user profile wholesale.
@@ -69,6 +70,35 @@ endpoint, model, and context limits mid-session. `/providers` lists all
 profiles without switching. Sub-agents inherit the
 parent's active profile and model via `--provider`/`--model` flags on
 the spawned `yoli run` process.
+
+## Reasoning ("thinking")
+
+Some models reason before answering. When a profile sets
+`include_reasoning: true`, yoli asks the backend to report that
+chain-of-thought separately from the answer and prints it as a `thinking`
+line, the way it already prints tool calls:
+
+```
+$ yoli chat "why does the build fail?"
+yoli: thinking> I should read the failing test before changing anything.
+...
+```
+
+- **TUI** — thinking renders dim, above the answer, capped at 400
+  characters so a long trace can't bury the response.
+- **`yoli chat`** — thinking goes to stderr at `--loglevel info` or
+  `debug`; the answer stays on stdout.
+- **`yoli agent`** — thinking is logged to the stderr trace as
+  `yoli: thinking[N]> …`.
+
+Reasoning is **display-only**. It is never written to a session file and
+never replayed to a provider: most OpenAI-compatible backends reject an
+assistant message carrying a `reasoning` field, so echoing it back would
+break the next turn.
+
+The flag is opt-in because `include_reasoning` is an OpenRouter
+extension — some self-hosted servers reject unknown request fields — and
+non-reasoning models simply omit the field.
 
 Profiles are edited by hand in the JSON file; `yoli provider list` (or
 `yoli config providers`) lists them (API keys are never printed).

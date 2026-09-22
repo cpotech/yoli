@@ -121,6 +121,7 @@ file, not env vars (see [docs/configuration.md](docs/configuration.md)):
 | `model` | Model identifier sent to the backend verbatim. |
 | `context_window` | Total context window in tokens (input + output). Set to your server's cap (e.g. a vLLM `max_model_len` of 32768) so the loop reserves output headroom and never overflows. Default 180000. |
 | `max_tokens` | Per-turn output-token cap (default 8192); lower it to leave more of the window for input. |
+| `include_reasoning` | When `true`, show the model's chain-of-thought as a `thinking` line (see [docs/configuration.md](docs/configuration.md)). Default `false`. |
 
 Output is the Yolium NDJSON protocol (`progress` and `complete` events), not Claude Code's `stream-json`. There is no `--output-format`, `--allowedTools`, `--dangerously-skip-permissions`, or `--verbose` flag.
 

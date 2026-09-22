@@ -41,10 +41,11 @@ func selectProviderProfile(cfg Config, profiles ProviderProfiles, flagProvider s
 // profile. Missing base_url or api_key surface as constructor errors.
 func newProviderFromProfile(p ProviderProfile, title string) (*providers.OpenAICompatProvider, error) {
 	return providers.NewOpenAICompatProvider(providers.OpenAICompatOptions{
-		APIKey:  p.APIKey,
-		BaseURL: p.BaseURL,
-		Referer: "https://github.com/yolium/yoli",
-		Title:   title,
+		APIKey:           p.APIKey,
+		BaseURL:          p.BaseURL,
+		Referer:          "https://github.com/yolium/yoli",
+		Title:            title,
+		IncludeReasoning: p.IncludeReasoning,
 	})
 }
 
@@ -69,4 +70,20 @@ func profileNames(profiles ProviderProfiles) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// formatProviderProfileLine renders one profile for listing: name,
+// endpoint, model, and a " *" marker when it is the active profile. API
+// keys are deliberately excluded so a listing can be pasted into a bug
+// report without leaking credentials.
+func formatProviderProfileLine(name string, p ProviderProfile, activeName string) string {
+	model := p.Model
+	if model == "" {
+		model = "(unset)"
+	}
+	marker := ""
+	if name == activeName {
+		marker = " *"
+	}
+	return fmt.Sprintf("%s: base_url=%s model=%s%s", name, p.BaseURL, model, marker)
 }

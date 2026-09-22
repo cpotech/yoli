@@ -1,0 +1,13 @@
+: keep-alive
+
+data: {"choices":[{"delta":{"role":"assistant","reasoning":"I should"}}]}
+
+data: {"choices":[{"delta":{"reasoning":" check the"}}]}
+
+data: {"choices":[{"delta":{"reasoning":" file first"}}]}
+
+data: {"choices":[{"delta":{"content":"done"}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

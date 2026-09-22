@@ -295,11 +295,11 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 		MaxTokens:           maxTokens,
 		ContextBudgetTokens: contextWindow,
 		OnMessage: func(m ai.Message) {
-			if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
-				_, _ = sess.AppendMessage(m)
-			}
 			switch m.Role {
 			case ai.RoleAssistant:
+				if m.Reasoning != nil && *m.Reasoning != "" && rank >= logRankInfo {
+					fmt.Fprintf(stderr, "yoli: thinking> %s\n", summarizeResult(*m.Reasoning, maxReasoningLogChars))
+				}
 				if m.Content != nil && *m.Content != "" {
 					fmt.Fprintln(stdout, *m.Content)
 				}
@@ -330,6 +330,13 @@ func runChat(args []string, stdout, stderr io.Writer) int {
 				case rank >= logRankError && isErr:
 					fmt.Fprintf(stderr, "yoli: ← %s %s\n", name, summarizeResult(body, 200))
 				}
+			}
+			// Persist after rendering: reasoning is display-only, so it
+			// is stripped here rather than stored — a resumed session
+			// must never replay it to a provider.
+			if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
+				m.Reasoning = nil
+				_, _ = sess.AppendMessage(m)
 			}
 		},
 	})

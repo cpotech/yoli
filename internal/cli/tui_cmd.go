@@ -34,10 +34,16 @@ const tuiHelp = `commands:
   /help            show this list
   /model [slug]    show or switch the model
   /provider [name] show or switch the provider profile
+  /providers       list provider profiles without switching
   /skill [name|off] show, set, or clear the active skill (Shift-Tab cycles)
   /context         show estimated context size
   /clear           start a new session
   /exit, /quit     leave the REPL (or Ctrl-D)`
+
+// maxReasoningChars caps the rendered chain-of-thought preview. Models
+// with heavy reasoning can emit tens of thousands of characters per
+// turn; showing all of it buries the answer in scrollback.
+const maxReasoningChars = 400
 
 // tuiLoopConfig carries everything runTUILoop needs, with the provider
 // and session injected so tests can drive the loop with a FauxProvider
@@ -698,11 +704,11 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 	var sp *tuiSpinner
 	render := func(m ai.Message) {
 		sp.Stop()
-		if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
-			_, _ = c.sess.AppendMessage(m)
-		}
 		switch m.Role {
 		case ai.RoleAssistant:
+			if m.Reasoning != nil && *m.Reasoning != "" {
+				fmt.Fprintln(stdout, tuiPaint("thinking: "+summarizeArgs(*m.Reasoning, maxReasoningChars), ansiDim, c.color))
+			}
 			if m.Content != nil && *m.Content != "" {
 				fmt.Fprintln(stdout, *m.Content)
 			}
@@ -725,6 +731,14 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 			} else {
 				fmt.Fprintln(stdout, tuiPaint(line, ansiDim, c.color))
 			}
+		}
+		// Persist after rendering: reasoning is display-only, so it is
+		// stripped here rather than stored — a resumed session must never
+		// replay it to a provider (most OpenAI-compatible backends reject
+		// assistant messages carrying a reasoning field).
+		if m.Role == ai.RoleAssistant || m.Role == ai.RoleTool {
+			m.Reasoning = nil
+			_, _ = c.sess.AppendMessage(m)
 		}
 	}
 
@@ -856,20 +870,22 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 		}
 		c.model = args[0]
 		fmt.Fprintf(stdout, "model set to %s\n", c.model)
+	case "/providers":
+		// List-only counterpart to `/provider`: same lines, but without
+		// the "provider: <active>" header and without switching. The
+		// star still marks the active profile.
+		if len(c.profiles) == 0 {
+			fmt.Fprintln(stdout, "(no provider profiles defined)")
+			return false
+		}
+		for _, name := range profileNames(c.profiles) {
+			fmt.Fprintf(stdout, "%s\n", formatProviderProfileLine(name, c.profiles[name], c.profileName))
+		}
 	case "/provider":
 		if len(args) == 0 {
 			fmt.Fprintf(stdout, "provider: %s\n", c.profileName)
 			for _, name := range profileNames(c.profiles) {
-				p := c.profiles[name]
-				marker := ""
-				if name == c.profileName {
-					marker = " *"
-				}
-				model := p.Model
-				if model == "" {
-					model = "(unset)"
-				}
-				fmt.Fprintf(stdout, "  %s: base_url=%s model=%s%s\n", name, p.BaseURL, model, marker)
+				fmt.Fprintf(stdout, "  %s\n", formatProviderProfileLine(name, c.profiles[name], c.profileName))
 			}
 			return false
 		}

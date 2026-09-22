@@ -132,7 +132,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 
 		req := ai.ChatRequest{
 			Model:     opts.Model,
-			Messages:  compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale)),
+			Messages:  compactConversation(scrubReasoning(scrubAbortedToolCallTags(conv)), scaleBudget(inputBudget, estScale)),
 			MaxTokens: maxTokens,
 		}
 		if len(defs) > 0 {
@@ -152,7 +152,7 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 			if estScale > maxOverflowScale {
 				estScale = maxOverflowScale
 			}
-			req.Messages = compactConversation(scrubAbortedToolCallTags(conv), scaleBudget(inputBudget, estScale))
+			req.Messages = compactConversation(scrubReasoning(scrubAbortedToolCallTags(conv)), scaleBudget(inputBudget, estScale))
 			resp, err = opts.Provider.Chat(ctx, req)
 		}
 		if err != nil {
@@ -195,8 +195,9 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 		}
 
 		assistant := ai.Message{
-			Role:    ai.RoleAssistant,
-			Content: resp.Content,
+			Role:      ai.RoleAssistant,
+			Content:   resp.Content,
+			Reasoning: resp.Reasoning,
 		}
 		// Sanitize tool_call Arguments fields BEFORE storing the
 		// assistant message. When a model hits its output cap
@@ -382,7 +383,7 @@ func flushTerminator(
 
 	req := ai.ChatRequest{
 		Model:     opts.Model,
-		Messages:  compactConversation(scrubAbortedToolCallTags(conv), inputBudget),
+		Messages:  compactConversation(scrubReasoning(scrubAbortedToolCallTags(conv)), inputBudget),
 		MaxTokens: maxTokens,
 	}
 	if len(defs) > 0 {
@@ -475,6 +476,30 @@ func stripAbortedToolCallTag(content string) (string, bool) {
 // builds) so a poisoned session recovers on its next turn instead of
 // teaching the model the aborted pattern forever. Copy-on-write: the
 // caller's slice and messages are never mutated.
+// scrubReasoning drops the chain-of-thought text from every assistant
+// message before the conversation is sent to the provider. Reasoning is
+// display-only — OpenRouter and most OpenAI-compatible backends reject a
+// replayed assistant message that carries a `reasoning` field, so echoing
+// it back would break the very next turn. Copy-on-write: the caller's
+// slice and messages are never mutated, so the CLI can still render the
+// reasoning it received.
+func scrubReasoning(conv []ai.Message) []ai.Message {
+	out := conv
+	copied := false
+	for i, m := range conv {
+		if m.Role != ai.RoleAssistant || m.Reasoning == nil {
+			continue
+		}
+		if !copied {
+			out = make([]ai.Message, len(conv))
+			copy(out, conv)
+			copied = true
+		}
+		out[i].Reasoning = nil
+	}
+	return out
+}
+
 func scrubAbortedToolCallTags(conv []ai.Message) []ai.Message {
 	out := conv
 	copied := false

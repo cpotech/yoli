@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -663,4 +664,132 @@ func TestRunAgentLoop_QuestionLineExitsCleanlyWithoutFallback(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(repo, ".yolium", "summary.md")); err == nil {
 		t.Fatalf("summary.md should not be written for a pending question")
 	}
+}
+
+func TestRunAgentLoop_LogsAssistantReasoning(t *testing.T) {
+	// Headless runs log progress on stderr; the model's chain-of-thought
+	// must show up there too so operators can see what the agent is
+	// thinking, the way tool calls already do.
+	reasoning := "I should inspect the failing test first"
+	var stdout, stderr bytes.Buffer
+	prov := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strp("done"), Reasoning: &reasoning},
+	})
+
+	code := runAgentLoop(agentLoopConfig{
+		provider: prov,
+		model:    "faux",
+		prompt:   "go",
+		repoPath: t.TempDir(),
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit = %d (no terminator expected); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), reasoning) {
+		t.Fatalf("reasoning not logged: stderr = %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "thinking") {
+		t.Fatalf("reasoning not labelled: stderr = %q", stderr.String())
+	}
+}
+
+func TestRunAgentLoop_NoThinkingLineWhenNoReasoning(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	prov := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strp("done")},
+	})
+	_ = runAgentLoop(agentLoopConfig{
+		provider: prov,
+		model:    "faux",
+		prompt:   "go",
+		repoPath: t.TempDir(),
+	}, &stdout, &stderr)
+	if strings.Contains(stderr.String(), "thinking") {
+		t.Fatalf("unexpected thinking line: stderr = %q", stderr.String())
+	}
+}
+
+func TestRunAgentLoop_ReasoningNotReplayedToProvider(t *testing.T) {
+	// A resumed/retried turn must not send reasoning back: most
+	// OpenAI-compatible backends reject assistant messages that carry it.
+	reasoning := "secret chain of thought"
+	prov := providers.NewFauxProvider([]ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{ID: "c1", Name: "Bash", Arguments: `{"command":"echo hi"}`}}},
+		{Content: strp("done"), Reasoning: &reasoning},
+	})
+	rec := &recordingProvider{inner: prov}
+
+	_ = runAgentLoop(agentLoopConfig{
+		provider: rec,
+		model:    "faux",
+		prompt:   "go",
+		repoPath: t.TempDir(),
+	}, io.Discard, io.Discard)
+
+	if len(rec.reqs) < 2 {
+		t.Fatalf("provider calls = %d, want >= 2", len(rec.reqs))
+	}
+	last := rec.reqs[len(rec.reqs)-1]
+	for _, m := range last.Messages {
+		if m.Reasoning != nil {
+			t.Fatalf("request replays assistant Reasoning = %q", *m.Reasoning)
+		}
+	}
+}
+
+func TestRunAgentLoop_ReasoningNeverPersistedToSession(t *testing.T) {
+	// Reasoning must stay display-only: it is logged, then stripped
+	// before AppendMessage. Writing it would both leak the chain-of-
+	// thought onto disk (visible via `yoli session`) and break the
+	// documented guarantee that a resumed session never replays it.
+	reasoning := "secret chain of thought"
+	repo := t.TempDir()
+	root := t.TempDir()
+	prov := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strp(`@@YOLIUM:{"type":"complete","summary":"done"}`), Reasoning: &reasoning},
+	})
+	var stdout, stderr bytes.Buffer
+	code := runAgentLoop(agentLoopConfig{
+		provider:    prov,
+		model:       "faux",
+		prompt:      "go",
+		repoPath:    repo,
+		sessionRoot: root,
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit = %d; stderr = %q", code, stderr.String())
+	}
+	// The reasoning was rendered to the trace…
+	if !strings.Contains(stderr.String(), reasoning) {
+		t.Fatalf("reasoning not logged: stderr = %q", stderr.String())
+	}
+	// …but it must not appear anywhere in the session files on disk.
+	found := sessionFilesContaining(t, root, reasoning)
+	if len(found) > 0 {
+		t.Fatalf("reasoning persisted to session file(s) %v", found)
+	}
+}
+
+// sessionFilesContaining walks the session root and returns the paths of
+// any session file whose bytes contain needle.
+func sessionFilesContaining(t *testing.T, root, needle string) []string {
+	t.Helper()
+	var hits []string
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), needle) {
+			hits = append(hits, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+	return hits
 }

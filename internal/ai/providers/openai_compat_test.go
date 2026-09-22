@@ -765,3 +765,190 @@ func TestChatStream_ErrorOnNon2xxIncludesStatus(t *testing.T) {
 		t.Fatalf("err = %v, want one containing 401", err)
 	}
 }
+
+// --- reasoning ("thinking") ---
+
+func TestChat_OmitsIncludeReasoningByDefault(t *testing.T) {
+	// include_reasoning is non-standard: sending it to an arbitrary
+	// OpenAI-compatible server risks a 400, so it must be opt-in.
+	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]any{"role": "assistant", "content": ""}},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := body["include_reasoning"]; ok {
+		t.Fatalf("include_reasoning must be omitted by default, got %v", body["include_reasoning"])
+	}
+}
+
+func TestChat_SendsIncludeReasoningWhenEnabled(t *testing.T) {
+	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]any{"role": "assistant", "content": "hi"}},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{IncludeReasoning: true})
+	if _, err := p.Chat(context.Background(), userReq("x")); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["include_reasoning"] != true {
+		t.Fatalf("include_reasoning = %v, want true", body["include_reasoning"])
+	}
+}
+
+func TestChat_SendsIncludeReasoningOnStreamWhenEnabled(t *testing.T) {
+	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(loadFixture(t, "openrouter-reasoning.sse"))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{IncludeReasoning: true})
+	seq, err := p.ChatStream(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	collectStream(t, seq)
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if body["include_reasoning"] != true {
+		t.Fatalf("include_reasoning = %v, want true", body["include_reasoning"])
+	}
+}
+
+func TestChat_ParsesReasoningFromMessage(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{
+					"message": map[string]any{
+						"role":      "assistant",
+						"content":   "42",
+						"reasoning": "I should compute the answer",
+					},
+				},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{IncludeReasoning: true})
+	res, err := p.Chat(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Reasoning == nil || *res.Reasoning != "I should compute the answer" {
+		t.Fatalf("Reasoning = %v", res.Reasoning)
+	}
+	if res.Content == nil || *res.Content != "42" {
+		t.Fatalf("Content = %v, want 42", res.Content)
+	}
+}
+
+func TestChat_ReasoningNilWhenAbsent(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]any{"role": "assistant", "content": "hi"}},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	res, err := p.Chat(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Reasoning != nil {
+		t.Fatalf("Reasoning = %v, want nil", *res.Reasoning)
+	}
+}
+
+func TestChatStream_YieldsReasoningChunksBeforeContent(t *testing.T) {
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(loadFixture(t, "openrouter-reasoning.sse"))
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{IncludeReasoning: true})
+	seq, err := p.ChatStream(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	chunks := collectStream(t, seq)
+
+	var reasoning, content string
+	seenContent := false
+	for _, c := range chunks {
+		switch c.Type {
+		case ai.ChunkReasoning:
+			if seenContent {
+				t.Fatalf("reasoning chunk after content: %+v", chunks)
+			}
+			reasoning += c.Delta
+		case ai.ChunkContent:
+			seenContent = true
+			content += c.Delta
+		}
+	}
+	if reasoning == "" {
+		t.Fatalf("no reasoning chunks: %+v", chunks)
+	}
+	if reasoning != "I should check the file first" {
+		t.Fatalf("reasoning = %q", reasoning)
+	}
+	if content != "done" {
+		t.Fatalf("content = %q", content)
+	}
+}
+
+func TestChat_NeverSendsReasoningInAssistantMessages(t *testing.T) {
+	// Reasoning is display-only: replaying it to an OpenAI-compatible
+	// backend is rejected by most servers, and it would double-bill the
+	// thinking tokens. The wire encoder must drop it entirely.
+	srv, rec := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{
+				map[string]any{"message": map[string]any{"role": "assistant", "content": ""}},
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{IncludeReasoning: true})
+	reasoning := "secret chain of thought"
+	if _, err := p.Chat(context.Background(), ai.ChatRequest{
+		Model: "m",
+		Messages: []ai.Message{
+			{Role: ai.RoleUser, Content: strPtr("go")},
+			{Role: ai.RoleAssistant, Content: strPtr("thinking"), Reasoning: &reasoning},
+		},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if strings.Contains(string(rec.Body), "secret chain of thought") {
+		t.Fatalf("reasoning leaked into the request body: %s", rec.Body)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	msgs, _ := body["messages"].([]any)
+	if len(msgs) != 2 {
+		t.Fatalf("messages len = %d", len(msgs))
+	}
+	assistant, _ := msgs[1].(map[string]any)
+	if _, ok := assistant["reasoning"]; ok {
+		t.Fatalf("assistant message carries a reasoning field: %v", assistant)
+	}
+}

@@ -17,6 +17,13 @@ type ProviderProfile struct {
 	Model         string `json:"model,omitempty"`
 	ContextWindow int    `json:"context_window,omitempty"`
 	MaxTokens     int    `json:"max_tokens,omitempty"`
+	// IncludeReasoning asks the backend to report the model's
+	// chain-of-thought separately from the answer, so the CLI can show
+	// what the agent is thinking. Opt-in: the underlying request flag
+	// (`include_reasoning`) is an OpenRouter extension that some
+	// OpenAI-compatible servers reject, and non-reasoning models omit
+	// the field entirely.
+	IncludeReasoning bool `json:"include_reasoning,omitempty"`
 }
 
 // ProviderProfiles maps profile name → ProviderProfile.

@@ -600,6 +600,9 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 		switch m.Role {
 		case ai.RoleAssistant:
 			turn++
+			if m.Reasoning != nil && *m.Reasoning != "" {
+				logAssistantReasoning(stderr, turn, *m.Reasoning)
+			}
 			if m.Content != nil && *m.Content != "" {
 				logAssistantContent(stderr, turn, *m.Content)
 				dispatchAssistantEvents(*m.Content, stdout, exit, suppressTextComplete)
@@ -621,6 +624,10 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 					bashCallIDs[call.ID] = true
 				}
 			}
+			// Persist after rendering: reasoning is display-only, so it
+			// is stripped here rather than stored — a resumed session
+			// must never replay it to a provider.
+			m.Reasoning = nil
 			_, _ = sess.AppendMessage(m)
 		case ai.RoleTool:
 			if m.Content != nil {
@@ -771,9 +778,22 @@ func readExistingSummary(repoPath string) (string, bool) {
 // verbose that a 65KB tool output floods the trace.
 const (
 	maxAssistantLogChars  = 4000
+	maxReasoningLogChars  = 2000
 	maxToolArgLogChars    = 400
 	maxToolResultLogChars = 600
 )
+
+// logAssistantReasoning renders the model's chain-of-thought for a turn
+// on the trace stream, labelled so it is never mistaken for the
+// assistant's answer. Truncation uses the same cap as assistant content
+// so a long reasoning trace cannot flood the log.
+func logAssistantReasoning(w io.Writer, turn int, reasoning string) {
+	text, truncated := truncate(singleLine(reasoning), maxReasoningLogChars)
+	fmt.Fprintf(w, "yoli: thinking[%d]> %s\n", turn, text)
+	if truncated {
+		fmt.Fprintf(w, "yoli: thinking[%d]> ...(truncated, %d chars total)\n", turn, len(reasoning))
+	}
+}
 
 func logAssistantContent(w io.Writer, turn int, content string) {
 	text, truncated := truncate(content, maxAssistantLogChars)

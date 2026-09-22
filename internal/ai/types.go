@@ -36,6 +36,12 @@ type Message struct {
 	Content    *string    `json:"content,omitempty"`
 	ToolCalls  []ToolCall `json:"toolCalls,omitempty"`
 	ToolCallID string     `json:"toolCallId,omitempty"`
+	// Reasoning carries the model's chain-of-thought text for an
+	// assistant turn, when the backend reports it separately from
+	// Content. It is display-only: toWireMessage never forwards it to
+	// the provider, because OpenAI-compatible backends reject assistant
+	// messages carrying a reasoning field.
+	Reasoning *string `json:"reasoning,omitempty"`
 }
 
 // ToolDefinition describes a tool exposed to the model.
@@ -65,7 +71,14 @@ type Usage struct {
 
 // ChatResponse is a non-streaming reply from a Provider.
 type ChatResponse struct {
-	Content   *string
+	Content *string
+	// Reasoning holds the model's chain-of-thought ("thinking") text
+	// when the backend reports it separately from Content (OpenRouter's
+	// `reasoning` field, exposed when the request opts in with
+	// include_reasoning). It is display-only: it is never persisted into
+	// the conversation or replayed to a provider, because backends
+	// reject assistant messages carrying a reasoning field.
+	Reasoning *string
 	ToolCalls []ToolCall
 	Usage     *Usage
 	// FinishReason is the backend's finish_reason for the first choice
@@ -80,18 +93,25 @@ type ChatResponse struct {
 type ChunkType string
 
 const (
-	ChunkContent  ChunkType = "content"
-	ChunkToolCall ChunkType = "tool_call"
-	ChunkFinish   ChunkType = "finish"
+	ChunkContent ChunkType = "content"
+	// ChunkReasoning carries the model's chain-of-thought ("thinking")
+	// text. Reasoning is separate from Content so callers can render it
+	// differently (or drop it) without confusing it with the answer, and
+	// it is never persisted as assistant content: most backends reject a
+	// replayed reasoning field.
+	ChunkReasoning ChunkType = "reasoning"
+	ChunkToolCall  ChunkType = "tool_call"
+	ChunkFinish    ChunkType = "finish"
 )
 
 // ChatStreamChunk is a single event from a streaming provider.
 //
 // Which fields are populated depends on Type:
 //
-//	ChunkContent:  Delta
-//	ChunkToolCall: Index, ID, Name, ArgumentsDelta
-//	ChunkFinish:   Reason
+//	ChunkContent:   Delta
+//	ChunkReasoning: Delta
+//	ChunkToolCall:  Index, ID, Name, ArgumentsDelta
+//	ChunkFinish:    Reason
 type ChatStreamChunk struct {
 	Type           ChunkType
 	Delta          string
