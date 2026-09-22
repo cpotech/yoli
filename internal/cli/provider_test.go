@@ -1,10 +1,16 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"yoli/internal/agent"
+	"yoli/internal/ai"
 )
 
 func TestSelectProviderProfile_FlagBeatsDefaultProvider(t *testing.T) {
@@ -102,4 +108,58 @@ func TestContextLimits_ProfileValuesAndDefaults(t *testing.T) {
 	if w != agent.DefaultContextBudget || m != agent.DefaultMaxOutputTokens {
 		t.Fatalf("non-positive values should fall back to defaults: %d/%d", w, m)
 	}
+}
+
+func TestNewProviderFromProfile_ForwardsIncludeReasoning(t *testing.T) {
+	// The profile flag must reach the provider: without it the backend
+	// never reports chain-of-thought and the CLI can render nothing.
+	// Assert on the observable request body rather than private fields.
+	on := newReasoningRecorder(t)
+	p, err := newProviderFromProfile(ProviderProfile{
+		BaseURL: on.URL, APIKey: "k", IncludeReasoning: true,
+	}, "T")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := p.Chat(context.Background(), ai.ChatRequest{Model: "m"}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !on.sawIncludeReasoning {
+		t.Fatalf("include_reasoning not sent when the profile enables it")
+	}
+
+	off := newReasoningRecorder(t)
+	p2, err := newProviderFromProfile(ProviderProfile{BaseURL: off.URL, APIKey: "k"}, "T")
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := p2.Chat(context.Background(), ai.ChatRequest{Model: "m"}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if off.sawIncludeReasoning {
+		t.Fatalf("include_reasoning sent when the profile omits it")
+	}
+}
+
+// reasoningRecorder serves one /chat/completions request and records
+// whether the body carried include_reasoning: true.
+type reasoningRecorder struct {
+	URL                 string
+	sawIncludeReasoning bool
+}
+
+func newReasoningRecorder(t *testing.T) *reasoningRecorder {
+	t.Helper()
+	rec := &reasoningRecorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(body, &parsed)
+		rec.sawIncludeReasoning = parsed["include_reasoning"] == true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+	rec.URL = srv.URL
+	return rec
 }

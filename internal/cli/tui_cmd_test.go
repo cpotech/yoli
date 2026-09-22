@@ -278,7 +278,7 @@ func TestTUIEditor_CursorSubRowForWrappedLine(t *testing.T) {
 		prefix: prefix,
 		width:  width,
 		prompt: strings.Repeat("x", 100), // 102 cols incl. prefix => 3 rows
-		cursor: 45,                        // 2-char prefix + 43 => col 45 -> 2nd visual row
+		cursor: 45,                       // 2-char prefix + 43 => col 45 -> 2nd visual row
 	}
 	e.redrawLine()
 	// rows: line0 has 3 visual rows (102 cols). cursor col 45 -> row index
@@ -710,4 +710,109 @@ func TestTuiLineEditor(t *testing.T) {
 			t.Errorf("expected empty prompt, got %s", e.prompt)
 		}
 	})
+}
+
+func TestTUI_AssistantReasoningRenderedToStdout(t *testing.T) {
+	// A backend that reports chain-of-thought separately must have it
+	// shown like tool calls are — labelled and dim — so the user sees
+	// what the agent is thinking.
+	reasoning := "I should read the file first"
+	faux := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("hello"), Reasoning: &reasoning},
+	})
+	c := newTUITestConfig(faux)
+	code, stdout, _ := runTUITest(t, c, "hi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if !strings.Contains(stdout, "hello") {
+		t.Fatalf("missing content: stdout = %q", stdout)
+	}
+	if !strings.Contains(stdout, reasoning) {
+		t.Fatalf("missing reasoning: stdout = %q", stdout)
+	}
+	// Reasoning must be labelled so it isn't mistaken for the answer.
+	if !strings.Contains(stdout, "thinking") {
+		t.Fatalf("reasoning not labelled: stdout = %q", stdout)
+	}
+	// It must appear before the answer, matching the model's ordering.
+	if strings.Index(stdout, reasoning) > strings.Index(stdout, "hello") {
+		t.Fatalf("reasoning rendered after content: stdout = %q", stdout)
+	}
+}
+
+func TestTUI_NoReasoningLineWhenAbsent(t *testing.T) {
+	faux := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("plain answer")},
+	})
+	c := newTUITestConfig(faux)
+	code, stdout, _ := runTUITest(t, c, "hi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Contains(stdout, "thinking") {
+		t.Fatalf("unexpected thinking line: stdout = %q", stdout)
+	}
+	if !strings.Contains(stdout, "plain answer") {
+		t.Fatalf("missing content: stdout = %q", stdout)
+	}
+}
+
+func TestTUI_ReasoningNotPersistedIntoSession(t *testing.T) {
+	// Reasoning is display-only: persisting it would replay it to the
+	// provider on the next turn, and most backends reject that.
+	reasoning := "secret chain of thought"
+	faux := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("answer"), Reasoning: &reasoning},
+	})
+	c := newTUITestConfig(faux)
+	code, _, _ := runTUITest(t, c, "hi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	for _, m := range c.sess.BuildMessages() {
+		if m.Role != ai.RoleAssistant {
+			continue
+		}
+		if m.Reasoning != nil {
+			t.Fatalf("assistant message in session carries Reasoning = %q", *m.Reasoning)
+		}
+	}
+}
+
+func TestTUI_ReasoningRenderedDimWhenColorEnabled(t *testing.T) {
+	reasoning := "let me think"
+	faux := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("done"), Reasoning: &reasoning},
+	})
+	c := newTUITestConfig(faux)
+	c.color = true
+	code, stdout, _ := runTUITest(t, c, "hi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	want := ansiDim + "thinking: " + reasoning + ansiReset
+	if !strings.Contains(stdout, want) {
+		t.Fatalf("reasoning not dim-painted; want %q in stdout = %q", want, stdout)
+	}
+}
+
+func TestTUI_ReasoningTruncatedWhenLong(t *testing.T) {
+	// A 20 KB reasoning trace must not flood the terminal: cap the
+	// rendered preview the way tool arguments are capped.
+	long := strings.Repeat("r", 5000)
+	faux := providers.NewFauxProvider([]ai.ChatResponse{
+		{Content: strptr("done"), Reasoning: &long},
+	})
+	c := newTUITestConfig(faux)
+	code, stdout, _ := runTUITest(t, c, "hi\n/exit\n")
+	if code != 0 {
+		t.Fatalf("exit = %d", code)
+	}
+	if strings.Count(stdout, "r") > 600 {
+		t.Fatalf("reasoning not truncated: ~%d 'r' chars rendered", strings.Count(stdout, "r"))
+	}
+	if !strings.Contains(stdout, "thinking") {
+		t.Fatalf("thinking label missing: stdout = %q", stdout)
+	}
 }

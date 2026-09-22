@@ -1153,3 +1153,68 @@ func TestRun_CalibratesBudgetFromReportedUsage(t *testing.T) {
 		t.Fatalf("second request was not compacted despite 3x reported usage")
 	}
 }
+
+func TestRun_SurfacesReasoningOnAssistantMessage(t *testing.T) {
+	// Backends that report chain-of-thought separately (OpenRouter with
+	// include_reasoning) return it on ChatResponse, not in Content. The
+	// loop must carry it onto the assistant message so the CLI can render
+	// it — without mixing it into Content, which would pollute the
+	// conversation sent back to the provider.
+	reasoning := "I should read the file before editing it"
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("done"), Reasoning: &reasoning},
+	}}
+
+	var seen *ai.Message
+	conv, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("hello")},
+		OnMessage: func(m ai.Message) {
+			if m.Role == ai.RoleAssistant {
+				seen = &m
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if seen == nil {
+		t.Fatalf("no assistant message delivered to OnMessage")
+	}
+	if seen.Reasoning == nil || *seen.Reasoning != reasoning {
+		t.Fatalf("Reasoning = %v, want %q", seen.Reasoning, reasoning)
+	}
+	if seen.Content == nil || *seen.Content != "done" {
+		t.Fatalf("Content = %v, want done (reasoning must not leak into content)", seen.Content)
+	}
+	last := conv[len(conv)-1]
+	if last.Role != ai.RoleAssistant || last.Reasoning == nil || *last.Reasoning != reasoning {
+		t.Fatalf("conv last = %+v", last)
+	}
+}
+
+func TestRun_NoReasoningLeavesFieldNil(t *testing.T) {
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{Content: ptr("done")},
+	}}
+	var seen *ai.Message
+	if _, err := Run(context.Background(), RunOptions{
+		Provider: prov,
+		Model:    "m",
+		Messages: []ai.Message{userMsg("hello")},
+		OnMessage: func(m ai.Message) {
+			if m.Role == ai.RoleAssistant {
+				seen = &m
+			}
+		},
+	}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if seen == nil {
+		t.Fatalf("no assistant message delivered to OnMessage")
+	}
+	if seen.Reasoning != nil {
+		t.Fatalf("Reasoning = %v, want nil", *seen.Reasoning)
+	}
+}

@@ -23,16 +23,23 @@ type OpenAICompatOptions struct {
 	HTTPClient *http.Client
 	Referer    string
 	Title      string
+	// IncludeReasoning asks the backend to report the model's
+	// chain-of-thought separately from the answer (OpenRouter's
+	// `include_reasoning` request flag). Off by default: the flag is
+	// non-standard and some OpenAI-compatible servers reject unknown
+	// body fields.
+	IncludeReasoning bool
 }
 
 // OpenAICompatProvider speaks the OpenAI-compatible /chat/completions
 // API served by OpenRouter, vLLM, and other self-hosted backends.
 type OpenAICompatProvider struct {
-	apiKey  string
-	baseURL string
-	client  *http.Client
-	referer string
-	title   string
+	apiKey           string
+	baseURL          string
+	client           *http.Client
+	referer          string
+	title            string
+	includeReasoning bool
 }
 
 // NewOpenAICompatProvider validates options and returns a ready provider.
@@ -56,11 +63,12 @@ func NewOpenAICompatProvider(opts OpenAICompatOptions) (*OpenAICompatProvider, e
 		client = http.DefaultClient
 	}
 	return &OpenAICompatProvider{
-		apiKey:  key,
-		baseURL: baseURL,
-		client:  client,
-		referer: opts.Referer,
-		title:   opts.Title,
+		apiKey:           key,
+		baseURL:          baseURL,
+		client:           client,
+		referer:          opts.Referer,
+		title:            opts.Title,
+		includeReasoning: opts.IncludeReasoning,
 	}, nil
 }
 
@@ -78,6 +86,7 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 	}
 
 	var content *string
+	var reasoning *string
 	var toolCalls []ai.ToolCall
 	var usage *ai.Usage
 	var finishReason string
@@ -85,6 +94,7 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 		finishReason = wire.Choices[0].FinishReason
 		if m := wire.Choices[0].Message; m != nil {
 			content = m.Content
+			reasoning = m.Reasoning
 			if len(m.ToolCalls) > 0 {
 				toolCalls = make([]ai.ToolCall, len(m.ToolCalls))
 				for i, c := range m.ToolCalls {
@@ -111,6 +121,7 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 	}
 	return ai.ChatResponse{
 		Content:      content,
+		Reasoning:    reasoning,
 		ToolCalls:    toolCalls,
 		Usage:        usage,
 		FinishReason: finishReason,
@@ -145,6 +156,14 @@ func (p *OpenAICompatProvider) ChatStream(
 			}
 			choice := chunk.Choices[0]
 			if choice.Delta != nil {
+				if choice.Delta.Reasoning != "" {
+					if !yield(ai.ChatStreamChunk{
+						Type:  ai.ChunkReasoning,
+						Delta: choice.Delta.Reasoning,
+					}, nil) {
+						return
+					}
+				}
 				if choice.Delta.Content != "" {
 					if !yield(ai.ChatStreamChunk{
 						Type:  ai.ChunkContent,
@@ -192,6 +211,9 @@ func (p *OpenAICompatProvider) send(
 		body.MaxTokens = req.MaxTokens
 	}
 	body.Usage = &wireRequestUsage{Include: true}
+	if p.includeReasoning {
+		body.IncludeReasoning = true
+	}
 	if stream {
 		body.Stream = true
 	}
@@ -272,6 +294,7 @@ type wireToolCallFn struct {
 type wireResponseMessage struct {
 	Role      string         `json:"role"`
 	Content   *string        `json:"content"`
+	Reasoning *string        `json:"reasoning,omitempty"`
 	ToolCalls []wireToolCall `json:"tool_calls,omitempty"`
 }
 
@@ -292,6 +315,7 @@ type wireResponse struct {
 
 type wireStreamDelta struct {
 	Content   string              `json:"content,omitempty"`
+	Reasoning string              `json:"reasoning,omitempty"`
 	ToolCalls []WireToolCallDelta `json:"tool_calls,omitempty"`
 }
 
@@ -307,12 +331,13 @@ type wireRequestUsage struct {
 }
 
 type wireRequest struct {
-	Model     string            `json:"model"`
-	Messages  []any             `json:"messages"`
-	Tools     []wireTool        `json:"tools,omitempty"`
-	MaxTokens int               `json:"max_tokens,omitempty"`
-	Stream    bool              `json:"stream,omitempty"`
-	Usage     *wireRequestUsage `json:"usage,omitempty"`
+	Model            string            `json:"model"`
+	Messages         []any             `json:"messages"`
+	Tools            []wireTool        `json:"tools,omitempty"`
+	MaxTokens        int               `json:"max_tokens,omitempty"`
+	Stream           bool              `json:"stream,omitempty"`
+	Usage            *wireRequestUsage `json:"usage,omitempty"`
+	IncludeReasoning bool              `json:"include_reasoning,omitempty"`
 }
 
 type wireTool struct {

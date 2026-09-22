@@ -104,3 +104,27 @@ func TestLoadProviderProfiles_ProjectBeatsUserAndMergesRest(t *testing.T) {
 		t.Fatalf("user-only profile lost: %+v", got)
 	}
 }
+
+func TestReadProviderProfiles_ParsesIncludeReasoning(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	writeFile(t, p, `{"providers":{"or":{"base_url":"https://x/v1","api_key":"k","include_reasoning":true}}}`)
+	got, err := ReadProviderProfiles(p)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !got["or"].IncludeReasoning {
+		t.Fatalf("IncludeReasoning = false, want true")
+	}
+}
+
+func TestReadProviderProfiles_IncludeReasoningDefaultsFalse(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cfg.json")
+	writeFile(t, p, `{"providers":{"or":{"base_url":"https://x/v1","api_key":"k"}}}`)
+	got, err := ReadProviderProfiles(p)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if got["or"].IncludeReasoning {
+		t.Fatalf("IncludeReasoning = true, want false by default")
+	}
+}
