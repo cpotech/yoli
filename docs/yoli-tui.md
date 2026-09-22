@@ -38,7 +38,7 @@ Available commands in TUI mode:
 - `/model [slug]` - Show or switch the AI model
 - `/skill [name|off]` - Show, set, or clear the active skill (Shift-Tab cycles)
 - `/context` - Show estimated context size (includes the active skill body)
-- `/clear` - Start a new session
+- `/clear` (alias `/new`) - Start a new session
 - `/exit`, `/quit` - Leave the REPL
 
 ## Implementation Details

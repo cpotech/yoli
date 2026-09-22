@@ -344,7 +344,7 @@ func TestTUI_HelpListsCommandsWithoutProviderCall(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d", code)
 	}
-	for _, cmd := range []string{"/help", "/model", "/provider", "/providers", "/context", "/clear", "/exit", "/quit"} {
+	for _, cmd := range []string{"/help", "/model", "/provider", "/providers", "/context", "/clear", "/new", "/exit", "/quit"} {
 		if !strings.Contains(stdout, cmd) {
 			t.Fatalf("help output missing %s: %q", cmd, stdout)
 		}
@@ -507,23 +507,33 @@ func TestTUI_ProviderCommandUnknownNameKeepsState(t *testing.T) {
 	}
 }
 
-func TestTUI_ClearStartsNewSessionDroppingPriorTurns(t *testing.T) {
-	rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
-		{Content: strptr("first reply")},
-		{Content: strptr("second reply")},
-	})}
-	c := newTUITestConfig(rec)
-	code, _, _ := runTUITest(t, c, "remember the codeword\n/clear\nwhat now\n/exit\n")
-	if code != 0 {
-		t.Fatalf("exit = %d", code)
-	}
-	if len(rec.reqs) != 2 {
-		t.Fatalf("provider called %d times", len(rec.reqs))
-	}
-	for _, m := range rec.reqs[1].Messages {
-		if m.Content != nil && strings.Contains(*m.Content, "remember the codeword") {
-			t.Fatalf("prior turn leaked into post-/clear request")
-		}
+// TestTUI_ClearAliasesStartNewSessionDroppingPriorTurns checks that
+// /clear and /new are interchangeable: both must swap in a fresh session
+// so the next turn's request carries none of the prior turns.
+func TestTUI_ClearAliasesStartNewSessionDroppingPriorTurns(t *testing.T) {
+	for _, cmd := range []string{"/clear", "/new"} {
+		t.Run(cmd, func(t *testing.T) {
+			rec := &recordingProvider{inner: providers.NewFauxProvider([]ai.ChatResponse{
+				{Content: strptr("first reply")},
+				{Content: strptr("second reply")},
+			})}
+			c := newTUITestConfig(rec)
+			code, stdout, _ := runTUITest(t, c, "remember the codeword\n"+cmd+"\nwhat now\n/exit\n")
+			if code != 0 {
+				t.Fatalf("exit = %d", code)
+			}
+			if len(rec.reqs) != 2 {
+				t.Fatalf("provider called %d times", len(rec.reqs))
+			}
+			for _, m := range rec.reqs[1].Messages {
+				if m.Content != nil && strings.Contains(*m.Content, "remember the codeword") {
+					t.Fatalf("prior turn leaked into post-%s request", cmd)
+				}
+			}
+			if !strings.Contains(stdout, "started new session") {
+				t.Fatalf("%s did not confirm the new session: stdout = %q", cmd, stdout)
+			}
+		})
 	}
 }
 

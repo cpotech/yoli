@@ -37,7 +37,7 @@ const tuiHelp = `commands:
   /providers       list provider profiles without switching
   /skill [name|off] show, set, or clear the active skill (Shift-Tab cycles)
   /context         show estimated context size
-  /clear           start a new session
+  /clear, /new     start a new session
   /exit, /quit     leave the REPL (or Ctrl-D)`
 
 // maxReasoningChars caps the rendered chain-of-thought preview. Models
@@ -53,8 +53,8 @@ type tuiLoopConfig struct {
 	model    string
 	tools    []tools.Tool
 	sess     *agentsession.Session
-	// newSession backs /clear; it honours the original session flags
-	// (e.g. --no-session keeps sessions in-memory).
+	// newSession backs /clear and /new; it honours the original
+	// session flags (e.g. --no-session keeps sessions in-memory).
 	newSession func() (*agentsession.Session, error)
 	// color gates ANSI escapes on stdout (stdout is a terminal and
 	// NO_COLOR is unset).
@@ -845,7 +845,7 @@ func runTUILoop(c tuiLoopConfig, in io.Reader, stdout, stderr io.Writer) int {
 }
 
 // tuiSlashCommand handles a "/..." line. It returns true when the REPL
-// should exit. It may swap c.sess (/clear), c.model (/model),
+// should exit. It may swap c.sess (/clear and /new), c.model (/model),
 // c.activeSkill (/skill), or c.provider and its limits (/provider).
 func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr io.Writer) bool {
 	fields := strings.Fields(line)
@@ -855,7 +855,7 @@ func tuiSlashCommand(c *tuiLoopConfig, line, baseSystem string, stdout, stderr i
 		return true
 	case "/help":
 		fmt.Fprintln(stdout, tuiHelp)
-	case "/clear":
+	case "/clear", "/new":
 		ns, err := c.newSession()
 		if err != nil {
 			fmt.Fprintln(stderr, err)
