@@ -1,5 +1,9 @@
 # yoli
 
+<p align="center">
+  <img src="docs/assets/yoli-logo.png" alt="yoli logo" width="128" height="128">
+</p>
+
 A small, provider-agnostic coding-agent CLI written in Go.
 
 https://github.com/user-attachments/assets/93ee9f20-f867-400a-9ccf-06af28e14edd
@@ -198,6 +202,7 @@ The version is applied consistently across build paths:
 - [Providers](docs/providers.md)
 - [Configuration](docs/configuration.md)
 - [Skills](docs/skills.md)
+- [Feature plans](docs/features/README.md) — planned work, not yet implemented
 
 ## License
 
