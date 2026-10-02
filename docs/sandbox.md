@@ -7,12 +7,16 @@ host. yoli ships a [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)
 network, against whichever repository you launch it from. The launch directory
 is the only host path the sandbox sees (mounted read-write at the same absolute
 path); your home directory, SSH keys and Docker socket are not visible inside.
+The script refuses to launch from a directory that contains your home directory
+or `~/.config/yoli` (such as `~` or `/`), since that would expose them.
 
 ## Prerequisites
 
 - Docker.
 - The **`sbx`** CLI (Docker Sandboxes). It installs to `~/.docker/sbx/bin/sbx`
   and is not always on `PATH`; `scripts/sbx.sh` finds it there automatically.
+- `python3`. The script uses it to read your yoli config and `sbx`'s JSON
+  output.
 
 ## Usage
 
@@ -38,7 +42,9 @@ cd /some/other/repo && yoli-sbx
 ```
 
 Knobs (environment variables): `NAME` (sandbox name, default `yoli-<dirname>`),
-`FORCE_BUILD=1` (rebuild the image, e.g. after changing yoli).
+`FORCE_BUILD=1` (rebuild the image, e.g. after changing yoli). If a sandbox with
+that name already exists for a different directory (`~/a/app` and `~/b/app`
+both default to `yoli-app`), the script stops rather than reuse it; set `NAME`.
 
 sbx runs images from its own store, not Docker's, so the script builds
 `yoli:sbx` with Docker and loads it into sbx (`sbx template load`) when sbx does
@@ -61,10 +67,11 @@ commands = {
 The editor's working directory picks the sandbox (`yoli-<dirname>`). The editor
 edits the files on the host and the agent edits the same files through the
 mount, so both see each other's changes. `yoli acp` does all file I/O and
-commands itself (it never asks the editor to via `fs/*` or `terminal/*`), so the
-sandbox boundary holds. The first start builds the image and creates the
-sandbox, which can outlast an editor's connect timeout — run `scripts/sbx.sh`
-once in a new project first; later starts take a couple of seconds.
+commands itself (it never asks the editor to via `fs/*` or `terminal/*`), so
+none of the agent's actions run on the host through the editor. The first start
+builds the image and creates the sandbox, which can outlast an editor's connect
+timeout — run `scripts/sbx.sh` once in a new project first; later starts take a
+couple of seconds.
 
 ## Running a Next.js app
 
@@ -137,6 +144,15 @@ sbx secret ls                          # list stored proxy secrets
 
 ## Notes and limitations
 
+- **The project directory is shared, so the sandbox limits what the agent
+  runs, not what it writes.** The agent can leave files there that your host
+  later executes: git hooks (`.git/hooks`, which `git status` does not show),
+  `.envrc`, editor project config (`.nvim.lua`, `.vscode/`), `Makefile` or
+  `package.json` scripts. Check what changed before running project commands on
+  the host. For stronger isolation, Docker Sandboxes' `sbx create --clone`
+  gives the agent a private clone instead of the shared directory;
+  `scripts/sbx.sh` does not use it because the editor-on-host workflow needs
+  the shared files.
 - The template's own npm (Ubuntu's 9.2) fails installs through the sandbox
   proxy with `ECONNRESET`, and can leave truncated native binaries behind (a
   Next.js build then dies with `Bus error`); the image puts npm 11 ahead of it.

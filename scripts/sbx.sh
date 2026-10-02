@@ -10,7 +10,8 @@
 # With arguments, stdin/stdout pass straight through to `yoli <args>` in the
 # sandbox, so an editor can run the agent sandboxed: e.g. CodeCompanion's ACP
 # command `{ "yoli-sbx", "acp" }` with this script linked onto PATH as
-# yoli-sbx. Only the current directory is mounted into the sandbox.
+# yoli-sbx. Only the current directory is mounted into the sandbox, and the
+# script refuses one that contains your home or ~/.config/yoli.
 #
 # API keys never enter the sandbox. yoli's config (delivered by the kit) carries
 # an inert per-provider placeholder as each api_key; the real keys are stored on
@@ -50,6 +51,17 @@ fi
 
 src_config="${XDG_CONFIG_HOME:-$HOME/.config}/yoli/config.json"
 
+# Never mount a directory that contains your home or the real yoli config
+# (e.g. ~ or /): the sandbox would see your keys and SSH keys.
+ws_prefix="${workspace%/}/"
+for p in "$HOME" "$src_config"; do
+  case "$p/" in
+    "$ws_prefix"*)
+      echo "sbx: refusing to mount $workspace: it contains $p — run from a project directory" >&2
+      exit 2 ;;
+  esac
+done
+
 # 1. Build the kit's image and load it into sbx if sbx lacks it, or when
 #    explicitly forced. sbx runs images from its own store, not Docker's.
 if [[ "${FORCE_BUILD:-}" == "1" ]] ||
@@ -79,10 +91,13 @@ out = sys.argv[2]
 def register(host, placeholder, value):
     if not (host and value):
         return
-    subprocess.run(
+    r = subprocess.run(
         [sbx, "secret", "set-custom", "-g", "--host", host,
          "--placeholder", placeholder, "--value", value],
-        check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"sbx: warning: could not register the key for {host}: "
+              f"{r.stderr.strip()}", file=sys.stderr)
 
 res = {}
 if cfg.get("default_provider"):
@@ -91,14 +106,10 @@ provs = {}
 for pname, p in (cfg.get("providers") or {}).items():
     if not isinstance(p, dict):
         continue
-    entry = {}
-    if p.get("base_url"): entry["base_url"] = p["base_url"]
-    if p.get("model"):    entry["model"] = p["model"]
-    for k in ("context_window", "max_tokens"):
-        if k in p: entry[k] = p[k]
     placeholder = f"yoli-sbx-{pname}"
-    entry["api_key"] = placeholder            # inert; proxy swaps it on egress
-    provs[pname] = entry
+    # api_key is the only secret in a profile; it becomes an inert
+    # placeholder the proxy swaps on egress. Every other field is kept.
+    provs[pname] = {**p, "api_key": placeholder}
     register(urlparse(p.get("base_url", "")).hostname or "", placeholder, p.get("api_key", ""))
 if provs:
     res["providers"] = provs
@@ -121,8 +132,18 @@ fi
 #    name), then attach the TUI, or run the given yoli command (sbx exec
 #    starts a stopped sandbox) — with a TTY when run from a terminal (e.g.
 #    `tui --provider x`), plain pipes when an editor runs it (`acp`).
-if ! "$sbx" ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$name"; then
+#    A same-named sandbox on another directory (~/a/app vs ~/b/app) is never
+#    reused: the agent would work on the wrong repo.
+mounted="$("$sbx" ls --json | python3 -c '
+import json, sys
+for s in json.load(sys.stdin)["sandboxes"]:
+    if s["name"] == sys.argv[1]:
+        print((s.get("workspaces") or ["?"])[0])' "$name")"
+if [[ -z "$mounted" ]]; then
   "$sbx" create --kit "$kit_dir" --name "$name" yoli "$workspace"
+elif [[ ! "$mounted" -ef "$workspace" ]]; then
+  echo "sbx: sandbox $name already mounts $mounted; set NAME= to use another name" >&2
+  exit 2
 fi
 if [[ $# -gt 0 ]]; then
   tty=()
