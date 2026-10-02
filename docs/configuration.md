@@ -1,7 +1,8 @@
 # Configuration
 
 Yoli reads all settings from config files — the process environment is
-never consulted. Three layered sources, with later sources taking
+never consulted for settings (only `HOME`/`XDG_CONFIG_HOME`, to find the
+user config). Three layered sources, with later sources taking
 precedence:
 
 1. **Defaults** — built into the CLI.
@@ -71,6 +72,13 @@ profiles without switching. Sub-agents inherit the
 parent's active profile and model via `--provider`/`--model` flags on
 the spawned `yoli run` process.
 
+Profiles are edited by hand in the JSON file; `yoli provider list` (or
+`yoli config providers`) lists them (API keys are never printed).
+
+Under [`yoli-sbx`](sandbox.md) the same file is used: the sandbox gets a copy
+with every `api_key` replaced by a placeholder, and the real keys stay on the
+host.
+
 ## Reasoning ("thinking")
 
 Some models reason before answering. When a profile sets
@@ -99,9 +107,6 @@ break the next turn.
 The flag is opt-in because `include_reasoning` is an OpenRouter
 extension — some self-hosted servers reject unknown request fields — and
 non-reasoning models simply omit the field.
-
-Profiles are edited by hand in the JSON file; `yoli provider list` (or
-`yoli config providers`) lists them (API keys are never printed).
 
 ## Working with config from the CLI
 

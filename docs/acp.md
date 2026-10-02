@@ -65,7 +65,8 @@ Details:
   (`-32603`) carrying the message.
 - **No permission prompts.** Tools run without asking, as in `chat` and
   `tui`. The Bash policy still blocks the same footguns (see
-  [architecture.md](architecture.md)).
+  [Git workflow](../README.md#git-workflow)). To isolate the agent, run
+  it sandboxed with `yoli-sbx acp` (see below).
 - **MCP servers.** yoli has no MCP client. Any `mcpServers` the editor
   sends are logged to stderr and ignored.
 

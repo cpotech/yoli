@@ -1,66 +1,106 @@
-# Running yoli in a sandbox
+# Running yoli in a sandbox (`yoli-sbx`)
 
 yoli's agent reads files, runs arbitrary shell commands through the `Bash`
 tool, and reaches the network — so you may want to run it isolated from your
-host. yoli ships a [Docker Sandboxes](https://docs.docker.com/ai/sandboxes/)
-**kit** that runs the agent inside a microVM with its own filesystem and
-network, against whichever repository you launch it from. The launch directory
-is the only host path the sandbox sees (mounted read-write at the same absolute
-path); your home directory, SSH keys and Docker socket are not visible inside.
-The script refuses to launch from a directory that contains your home directory
-or `~/.config/yoli` (such as `~` or `/`), since that would expose them.
+host. `yoli-sbx` runs yoli inside a
+[Docker Sandboxes](https://docs.docker.com/ai/sandboxes/) microVM with its own
+filesystem and network, against whichever project you launch it from. The
+launch directory is the only host path the sandbox sees (mounted read-write at
+the same absolute path); your home directory, SSH keys and Docker socket are
+not visible inside, and **your API keys never enter the sandbox**.
 
-## Prerequisites
+## Setup (once)
+
+You need:
 
 - Docker.
 - The **`sbx`** CLI (Docker Sandboxes). It installs to `~/.docker/sbx/bin/sbx`
-  and is not always on `PATH`; `scripts/sbx.sh` finds it there automatically.
+  and is not always on `PATH`; `yoli-sbx` finds it there automatically.
 - `python3`. The script uses it to read your yoli config and `sbx`'s JSON
   output.
+- Your provider profiles in `~/.config/yoli/config.json`, as for plain `yoli`
+  (see [configuration.md](configuration.md)).
+
+Then link the launcher onto your `PATH` as `yoli-sbx`, from the yoli repo:
+
+```bash
+ln -sf "$PWD/scripts/sbx.sh" ~/.local/bin/yoli-sbx   # ~/.local/bin must be on your PATH
+```
+
+`yoli-sbx` is just `scripts/sbx.sh`; the script resolves the symlink to find
+the rest of the repo, so keep the clone where it is.
 
 ## Usage
 
-`scripts/sbx.sh` is the single entry point. Run it from any repository:
+Run `yoli-sbx` from the project you want the agent to work on. With no
+arguments it opens the TUI; with arguments it runs `yoli <arguments>`:
+
+| Command | What it does |
+|---|---|
+| `yoli-sbx` | yoli TUI in a sandbox on the current directory. |
+| `yoli-sbx tui --provider <name>` | The TUI with a specific provider profile. |
+| `yoli-sbx chat "…"` | One-shot chat. |
+| `yoli-sbx acp` | ACP server for your editor (see [From your editor](#from-your-editor)). |
+| `yoli-sbx <any yoli command>` | e.g. `yoli-sbx version`, `yoli-sbx provider list`. |
 
 ```bash
-scripts/sbx.sh                        # yoli TUI in a sandbox on the current dir
+cd ~/code/my-project
+yoli-sbx
 ```
 
-It opens yoli's TUI inside the sandbox. To run other yoli commands in the same
-sandbox, use `sbx exec` (the sandbox is named `yoli-<dirname>`):
+The first run in a directory builds the `yoli:sbx` image and creates a sandbox
+named `yoli-<dirname>`, which takes a while. Later runs reuse that sandbox
+(starting it if it was stopped) and take a couple of seconds.
 
-```bash
-sbx exec yoli-<dirname> yoli chat "list the files here"
-```
+Two safety checks stop the launch:
 
-Run it against another repo by invoking it from there. For convenience, symlink
-it onto your `PATH` (the script resolves symlinks):
+- **Home directory.** It refuses to run from a directory that contains your
+  home directory or `~/.config/yoli` (such as `~` or `/`), since the sandbox
+  would then see your keys. Run it from a project directory.
+- **Name clash.** If `yoli-<dirname>` already exists for a *different*
+  directory (`~/a/app` and `~/b/app` both default to `yoli-app`), it stops
+  rather than let the agent work on the wrong project. Pick another name with
+  `NAME`.
 
-```bash
-ln -sf "$PWD/scripts/sbx.sh" ~/.local/bin/yoli-sbx
-cd /some/other/repo && yoli-sbx
-```
+Environment variables:
 
-Knobs (environment variables): `NAME` (sandbox name, default `yoli-<dirname>`),
-`FORCE_BUILD=1` (rebuild the image, e.g. after changing yoli). If a sandbox with
-that name already exists for a different directory (`~/a/app` and `~/b/app`
-both default to `yoli-app`), the script stops rather than reuse it; set `NAME`.
+| Variable | Effect |
+|---|---|
+| `NAME=<name>` | Sandbox name (default `yoli-<dirname>`). |
+| `FORCE_BUILD=1` | Rebuild the image, e.g. after changing yoli's code. |
 
-sbx runs images from its own store, not Docker's, so the script builds
+sbx runs images from its own store, not Docker's, so `yoli-sbx` builds
 `yoli:sbx` with Docker and loads it into sbx (`sbx template load`) when sbx does
-not have it yet, or when forced. `sbx template ls` lists what sbx has.
+not have it yet, or when `FORCE_BUILD=1`. After a rebuild, check
+`yoli-sbx version`; if a sandbox still runs the old yoli, remove it (below) and
+run `yoli-sbx` again.
+
+## Managing sandboxes
+
+These use the `sbx` CLI directly. If it isn't on your `PATH`, use the full path
+`~/.docker/sbx/bin/sbx` or add `~/.docker/sbx/bin` to your `PATH`.
+
+```bash
+sbx ls                                 # list sandboxes and the directory each one mounts
+sbx stop yoli-<dirname>                # stop a sandbox (yoli-sbx restarts it)
+sbx rm --force yoli-<dirname>          # remove a sandbox
+sbx ports yoli-<dirname>               # show published ports
+sbx secret ls                          # list stored proxy secrets (keys are masked)
+sbx secret rm -g --placeholder yoli-sbx-<provider>   # remove a key for a profile you deleted
+```
 
 ## From your editor
 
-With arguments, `scripts/sbx.sh` runs `yoli <args>` in the sandbox for the
-current directory (creating it on first use) and passes stdin/stdout straight
-through. So an editor can keep running on the host while the agent — and every
-command its `Bash` tool runs — stays in the sandbox. For CodeCompanion over ACP
-(see [acp.md](acp.md)), with the script linked onto `PATH` as `yoli-sbx`:
+`yoli-sbx acp` passes stdin/stdout straight through to `yoli acp` in the
+sandbox. So an editor can keep running on the host while the agent — and every
+command its `Bash` tool runs — stays in the sandbox. Use `yoli-sbx acp`
+wherever an editor setup in [acp.md](acp.md) says `yoli acp`. For
+CodeCompanion:
 
 ```lua
 commands = {
-  default = { "yoli-sbx", "acp", "--provider", "ten" },
+  default = { "yoli-sbx", "acp" },
+  -- or pick a profile: { "yoli-sbx", "acp", "--provider", "openrouter" },
 },
 ```
 
@@ -68,10 +108,10 @@ The editor's working directory picks the sandbox (`yoli-<dirname>`). The editor
 edits the files on the host and the agent edits the same files through the
 mount, so both see each other's changes. `yoli acp` does all file I/O and
 commands itself (it never asks the editor to via `fs/*` or `terminal/*`), so
-none of the agent's actions run on the host through the editor. The first start
-builds the image and creates the sandbox, which can outlast an editor's connect
-timeout — run `scripts/sbx.sh` once in a new project first; later starts take a
-couple of seconds.
+none of the agent's actions run on the host through the editor.
+
+The first start builds the image and creates the sandbox, which can outlast an
+editor's connect timeout — run `yoli-sbx` once in a new project first.
 
 ## Running a Next.js app
 
@@ -91,7 +131,7 @@ Publish other ports with `sbx ports yoli-<dirname> --publish <port>`.
 
 yoli reads its provider profiles only from `~/.config/yoli/config.json` (see
 [configuration.md](configuration.md)). Rather than mounting that file — which
-would expose your real keys to the agent — `scripts/sbx.sh`:
+would expose your real keys to the agent — `yoli-sbx`:
 
 1. Writes a **placeholder** config into the kit, identical to yours but with each
    `api_key` replaced by an inert per-provider placeholder (`yoli-sbx-<provider>`).
@@ -99,31 +139,32 @@ would expose your real keys to the agent — `scripts/sbx.sh`:
 2. Registers each real key as a host-side
    [proxy-managed secret](https://docs.docker.com/ai/sandboxes/security/credentials/)
    (`sbx secret set-custom`), keyed by the provider's host and the same
-   placeholder.
+   placeholder. If registering a key fails, it prints a warning naming the host.
 
 At runtime yoli sends the placeholder as its auth header; the host-side proxy
 swaps in the real key on the outbound request. The real keys never enter the
 sandbox's filesystem or environment. Both the placeholder config and the secrets
-are derived from `~/.config/yoli/config.json`, which stays the single source of
-truth.
+are refreshed from `~/.config/yoli/config.json` on every run, so it stays the
+single source of truth. A running sandbox picks up config changes when it next
+starts (`sbx stop yoli-<dirname>`, then `yoli-sbx`).
 
 ## What's in the repo
 
 | Path | Purpose |
 |---|---|
-| `scripts/sbx.sh` | Entry point: build image, register secrets, launch the kit. |
+| `scripts/sbx.sh` | The `yoli-sbx` launcher: build the image, register secrets, create and run the sandbox. |
 | `deploy/yoli-kit/spec.yaml` | Kit: defines the `yoli` agent, image, entrypoint, the Brave host allow-rule, and published port 3000. |
 | `deploy/yoli-kit/files/…/config.json` | Placeholder config (generated; git-ignored). |
 | `Dockerfile.sbx` | Builds `yoli:sbx` = the `shell` sandbox template + npm 11, pnpm, yarn + the yoli binary. |
 
 ## Testing
 
-The `sandbox`-created agent should answer normally; a `401` would mean a key
-never reached the provider. Verify with a free model without spending tokens
-(`ten` here is `tencent/hy3:free` on OpenRouter — adjust to a provider you have):
+A sandboxed yoli should answer normally; a `401` means a key never reached the
+provider. Check with a free model so it costs nothing (`ten` here is a profile
+for `tencent/hy3:free` on OpenRouter — use one you have):
 
 ```bash
-sbx exec yoli-<dirname> yoli chat --provider ten "reply with exactly: it works"
+yoli-sbx chat --provider ten "reply with exactly: it works"
 ```
 
 Confirm no real keys leaked into the sandbox:
@@ -132,14 +173,6 @@ Confirm no real keys leaked into the sandbox:
 sbx exec yoli-<dirname> bash -lc \
   'grep -o "yoli-sbx-[a-z]*" ~/.config/yoli/config.json; \
    grep -rE "sk-|BSA" ~ 2>/dev/null && echo LEAK || echo "no real keys"'
-```
-
-## Cleanup
-
-```bash
-sbx ls                                 # list sandboxes
-sbx rm --force yoli-<dirname>          # remove a sandbox
-sbx secret ls                          # list stored proxy secrets
 ```
 
 ## Notes and limitations
@@ -151,12 +184,11 @@ sbx secret ls                          # list stored proxy secrets
   `package.json` scripts. Check what changed before running project commands on
   the host. For stronger isolation, Docker Sandboxes' `sbx create --clone`
   gives the agent a private clone instead of the shared directory;
-  `scripts/sbx.sh` does not use it because the editor-on-host workflow needs
-  the shared files.
+  `yoli-sbx` does not use it because the editor-on-host workflow needs the
+  shared files.
 - The template's own npm (Ubuntu's 9.2) fails installs through the sandbox
   proxy with `ECONNRESET`, and can leave truncated native binaries behind (a
   Next.js build then dies with `Bus error`); the image puts npm 11 ahead of it.
-
 - `sbx kit` and `sbx secret set-custom` are **experimental** in the current
   Docker Sandboxes release; flags may change.
 - Placeholders are unique **per provider**, so two profiles on the same host

@@ -1,6 +1,6 @@
 # Providers
 
-Yoli ships two providers, all implementing the `Provider` interface from
+Yoli ships two providers, both implementing the `Provider` interface from
 `internal/ai`.
 
 ## FauxProvider
@@ -27,12 +27,12 @@ environment is never read:
 
 ## Provider selection
 
-`yoli chat`, `yoli tui`, `yoli run --role <role>`, and `yoli agent` all
-target `OpenAICompatProvider`. Which endpoint it talks to is decided by
+`yoli chat`, `yoli tui`, `yoli run --role <role>`, `yoli agent`, and
+`yoli acp` all target `OpenAICompatProvider`. Which endpoint it talks to is decided by
 named provider profiles defined under the `providers` key of the config
 file, with three selection surfaces:
 
-1. `--provider <name>` flag on `chat`, `tui`, `run`, and `agent`.
+1. `--provider <name>` flag on `chat`, `tui`, `run`, `agent`, and `acp`.
 2. `default_provider` config key.
 3. `/provider [name]` inside the TUI — lists profiles or switches the
    endpoint, model, and context limits mid-session. `/providers` (no
