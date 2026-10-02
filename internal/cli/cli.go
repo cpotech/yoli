@@ -14,12 +14,13 @@ Commands:
   tui                  Run an interactive line-based REPL
   run --role <role>    Run the stdio agent with the given role
   agent                Run the headless agent loop (Yolium protocol)
+  acp                  Run as an Agent Client Protocol server (editors)
   session <list|...>   Inspect or operate on session files
   skills <list|show>   Inspect skills available to the agent
   provider <list>      List the provider profiles you have configured
   config <get|set|...> Inspect or modify yoli configuration
 
-chat, tui, run, and agent accept --provider <name> to select a provider
+chat, tui, run, agent, and acp accept --provider <name> to select a provider
 profile from the config file's "providers" object.
 
 Session options (may also precede chat):
@@ -104,6 +105,8 @@ done:
 		return runRun(rest, stdin, stdout, stderr)
 	case "agent":
 		return runAgent(rest, stdout, stderr)
+	case "acp":
+		return runACP(rest, stdin, stdout, stderr)
 	case "session":
 		return runSession(rest, stdout, stderr)
 	case "skills":

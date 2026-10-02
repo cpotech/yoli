@@ -16,6 +16,10 @@ Providers are pure: they receive credentials explicitly through their
 options structs and expose a uniform streaming interface. They have no
 knowledge of how the agent is hosted (CLI, Yolium protocol, sub-agent).
 
+A rate-limited `Chat` (HTTP 429, or OpenRouter's HTTP 200 carrying a 429
+error body) is retried after 2s, 4s, 8s and 16s before the error is
+returned; cancelling the context stops the wait.
+
 ## `internal/agent`
 
 The agent loop and its tools. Contains:
@@ -48,7 +52,7 @@ The agent loop and its tools. Contains:
 The `yoli` command-line entry point. Owns:
 
 - Argument parsing for the `version`, `config`, `chat`, `tui`, `run`,
-  `agent`, `session`, and `skills` subcommands. Dispatch is a plain
+  `agent`, `acp`, `session`, and `skills` subcommands. Dispatch is a plain
   `switch` in `cli.Run` — no third-party argument parser.
 - Session resolution for `chat` and `agent`: parsing `--no-session`,
   `-c`, `--session`, and `--fork`, then handing a `*session.Session` to

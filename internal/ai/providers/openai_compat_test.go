@@ -11,7 +11,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"yoli/internal/ai"
 )
@@ -54,6 +56,8 @@ func newProvider(t *testing.T, srv *httptest.Server, opts OpenAICompatOptions) *
 	if err != nil {
 		t.Fatalf("NewOpenAICompatProvider: %v", err)
 	}
+	// No rate-limit retries unless a test opts in, so tests never sleep.
+	p.retryDelays = nil
 	return p
 }
 
@@ -407,6 +411,118 @@ func TestChat_ErrorOnNon2xxIncludesStatus(t *testing.T) {
 	_, err := p.Chat(context.Background(), userReq("x"))
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v, want one containing 401", err)
+	}
+}
+
+func TestChat_ErrorOn200WithErrorBody(t *testing.T) {
+	// OpenRouter answers an upstream rate limit with HTTP 200 and an
+	// error object instead of choices.
+	srv, _ := stubServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{
+			"error": map[string]any{
+				"message": "openai/gpt-5.6-luna is temporarily rate-limited upstream.",
+				"code":    429,
+			},
+		})
+	})
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	_, err := p.Chat(context.Background(), userReq("x"))
+	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "rate-limited") {
+		t.Fatalf("err = %v, want one with the code and message", err)
+	}
+}
+
+// rateLimitedThenOK answers the first `fails` requests with fail and
+// the rest with a normal completion, counting every request.
+func rateLimitedThenOK(fails int32, fail http.HandlerFunc) (http.HandlerFunc, *atomic.Int32) {
+	var calls atomic.Int32
+	return func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) <= fails {
+			fail(w, r)
+			return
+		}
+		jsonChoicesResponse(w, map[string]any{
+			"choices": []any{map[string]any{"message": map[string]any{"role": "assistant", "content": "ok"}}},
+		})
+	}, &calls
+}
+
+func status429(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusTooManyRequests)
+	_, _ = w.Write([]byte("slow down"))
+}
+
+func TestChat_RetriesRateLimitThenSucceeds(t *testing.T) {
+	h, calls := rateLimitedThenOK(2, status429)
+	srv, _ := stubServer(t, h)
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	p.retryDelays = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	res, err := p.Chat(context.Background(), userReq("x"))
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if res.Content == nil || *res.Content != "ok" || calls.Load() != 3 {
+		t.Fatalf("content = %v after %d calls, want ok after 3", res.Content, calls.Load())
+	}
+}
+
+func TestChat_RetriesRateLimitErrorBody(t *testing.T) {
+	h, calls := rateLimitedThenOK(1, func(w http.ResponseWriter, r *http.Request) {
+		jsonChoicesResponse(w, map[string]any{"error": map[string]any{"message": "rate-limited upstream", "code": 429}})
+	})
+	srv, _ := stubServer(t, h)
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	p.retryDelays = []time.Duration{time.Millisecond}
+	if _, err := p.Chat(context.Background(), userReq("x")); err != nil || calls.Load() != 2 {
+		t.Fatalf("err = %v after %d calls, want nil after 2", err, calls.Load())
+	}
+}
+
+func TestChat_GivesUpAfterRetries(t *testing.T) {
+	h, calls := rateLimitedThenOK(100, status429)
+	srv, _ := stubServer(t, h)
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	p.retryDelays = []time.Duration{time.Millisecond, time.Millisecond}
+	_, err := p.Chat(context.Background(), userReq("x"))
+	if err == nil || !strings.Contains(err.Error(), "429") || !strings.Contains(err.Error(), "gave up after 2 retries") {
+		t.Fatalf("err = %v, want 429 giving up after 2 retries", err)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("calls = %d, want 3", calls.Load())
+	}
+}
+
+func TestChat_DoesNotRetryOtherErrors(t *testing.T) {
+	h, calls := rateLimitedThenOK(100, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv, _ := stubServer(t, h)
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	p.retryDelays = []time.Duration{time.Millisecond}
+	if _, err := p.Chat(context.Background(), userReq("x")); err == nil || calls.Load() != 1 {
+		t.Fatalf("err = %v after %d calls, want an error after 1", err, calls.Load())
+	}
+}
+
+func TestChat_CancelStopsRetryWait(t *testing.T) {
+	h, _ := rateLimitedThenOK(100, status429)
+	srv, _ := stubServer(t, h)
+	p := newProvider(t, srv, OpenAICompatOptions{})
+	p.retryDelays = []time.Duration{time.Hour}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := p.Chat(ctx, userReq("x")); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context.DeadlineExceeded", err)
+	}
+}
+
+func TestNewOpenAICompatProvider_RetriesRateLimitsByDefault(t *testing.T) {
+	p, err := NewOpenAICompatProvider(OpenAICompatOptions{APIKey: "k", BaseURL: "http://x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.retryDelays) == 0 {
+		t.Fatal("retryDelays empty, want default backoff")
 	}
 }
 

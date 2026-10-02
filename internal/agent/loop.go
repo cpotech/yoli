@@ -351,7 +351,15 @@ func Run(ctx context.Context, opts RunOptions) ([]ai.Message, error) {
 		}
 	}
 
-	return conv, fmt.Errorf("Agent stopped after reaching maxIterations=%d without a final response", max)
+	return conv, &MaxIterationsError{Max: max}
+}
+
+// MaxIterationsError is returned by Run when the iteration cap is hit
+// without a final reply.
+type MaxIterationsError struct{ Max int }
+
+func (e *MaxIterationsError) Error() string {
+	return fmt.Sprintf("Agent stopped after reaching maxIterations=%d without a final response", e.Max)
 }
 
 // flushTerminator runs a single final wrap-up turn after the iteration cap
