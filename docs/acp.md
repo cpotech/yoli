@@ -56,7 +56,8 @@ Details:
   sees the full output.
 - **Whole turns.** Responses are not token-streamed. Each assistant turn
   arrives as one `agent_message_chunk`, and the UI updates turn by turn
-  and tool call by tool call.
+  and tool call by tool call. The [LazyVim](#lazyvim) setup adds a
+  spinner to show that a turn is in progress.
 - **Stop reasons.** `end_turn`, `cancelled`, or `max_turn_requests` when
   the loop's iteration cap is reached. Rate-limited provider requests
   are retried with backoff for about 30s first. Other provider errors,
@@ -112,6 +113,128 @@ require("codecompanion").setup({
   },
   interactions = { chat = { adapter = "yoli" } },
 })
+```
+
+### LazyVim
+
+The same CodeCompanion setup as a LazyVim plugin spec. Save it as
+`~/.config/nvim/lua/plugins/codecompanion.lua`. It adds `<leader>a`
+keymaps and a spinner at the end of the chat buffer while yoli works on a
+prompt. yoli sends whole turns, not streamed tokens, so without a spinner
+the chat stays silent until the turn arrives. The spinner listens for
+CodeCompanion's `RequestStarted`/`RequestFinished` events. `init` runs at
+startup, so the events are hooked up before the plugin lazy-loads.
+
+```lua
+-- Spinner at the end of the chat buffer while yoli is working on a prompt.
+local function spinner()
+  local frames = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+  local ns = vim.api.nvim_create_namespace("yoli_spinner")
+  local running = {} -- bufnr -> { timer, frame, started }
+
+  local function stop(buf)
+    local s = running[buf]
+    if not s then
+      return
+    end
+    running[buf] = nil
+    s.timer:stop()
+    s.timer:close()
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    end
+  end
+
+  local function draw(buf)
+    local s = running[buf]
+    if not s then
+      return
+    end
+    if not vim.api.nvim_buf_is_valid(buf) then
+      return stop(buf)
+    end
+    s.frame = s.frame % #frames + 1
+    local secs = math.floor((vim.uv.now() - s.started) / 1000)
+    local text = string.format(" %s yoli is working… %ds", frames[s.frame], secs)
+    vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
+    vim.api.nvim_buf_set_extmark(buf, ns, vim.api.nvim_buf_line_count(buf) - 1, 0, {
+      virt_text = { { text, "Comment" } },
+    })
+  end
+
+  vim.api.nvim_create_autocmd("User", {
+    group = vim.api.nvim_create_augroup("YoliSpinner", { clear = true }),
+    pattern = { "CodeCompanionRequestStarted", "CodeCompanionRequestFinished" },
+    callback = function(ev)
+      local buf = ev.data and ev.data.bufnr
+      if not buf then
+        return
+      end
+      stop(buf)
+      if ev.match == "CodeCompanionRequestStarted" and vim.bo[buf].filetype == "codecompanion" then
+        running[buf] = { timer = vim.uv.new_timer(), frame = 0, started = vim.uv.now() }
+        running[buf].timer:start(0, 100, vim.schedule_wrap(function()
+          draw(buf)
+        end))
+      end
+    end,
+  })
+end
+
+return {
+  "olimorris/codecompanion.nvim",
+  dependencies = { "nvim-lua/plenary.nvim", "nvim-treesitter/nvim-treesitter" },
+  init = spinner,
+  cmd = { "CodeCompanion", "CodeCompanionChat", "CodeCompanionActions" },
+  keys = {
+    { "<leader>aa", "<cmd>CodeCompanionChat Toggle<cr>", mode = { "n", "v" }, desc = "yoli: toggle chat" },
+    { "<leader>an", "<cmd>CodeCompanionChat<cr>", mode = { "n", "v" }, desc = "yoli: new chat" },
+    { "<leader>ap", "<cmd>CodeCompanionActions<cr>", mode = { "n", "v" }, desc = "yoli: action palette" },
+    { "ga", "<cmd>CodeCompanionChat Add<cr>", mode = "v", desc = "yoli: add selection to chat" },
+  },
+  opts = {
+    adapters = {
+      acp = {
+        yoli = function()
+          local helpers = require("codecompanion.adapters.acp.helpers")
+          return {
+            name = "yoli",
+            formatted_name = "yoli",
+            type = "acp",
+            roles = { llm = "assistant", user = "user" },
+            opts = { vision = false }, -- yoli acp rejects image blocks
+            commands = {
+              default = { "yoli", "acp" },
+              -- runpod = { "yoli", "acp", "--provider", "runpod" },
+            },
+            defaults = { mcpServers = {}, timeout = 20000 },
+            parameters = {
+              protocolVersion = 1,
+              clientCapabilities = { fs = { readTextFile = true, writeTextFile = true } },
+              clientInfo = { name = "CodeCompanion.nvim", version = "1.0.0" },
+            },
+            handlers = {
+              setup = function()
+                return true
+              end,
+              -- yoli advertises no auth methods.
+              auth = function()
+                return true
+              end,
+              form_messages = function(self, messages, capabilities)
+                return helpers.form_messages(self, messages, capabilities)
+              end,
+              on_exit = function() end,
+            },
+          }
+        end,
+      },
+    },
+    interactions = {
+      chat = { adapter = "yoli" },
+    },
+  },
+}
 ```
 
 ### avante.nvim
