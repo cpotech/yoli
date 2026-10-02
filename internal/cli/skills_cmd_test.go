@@ -92,3 +92,33 @@ func TestFormatSkillsList_AllOriginLabelsAppear(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadSkillsIn_UsesGivenCwdForProjectSkills(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmp := t.TempDir()
+	writeSkill(t, tmp, "acp-demo", "demo body", "Demo skill")
+
+	hasDemo := func(list []skills.LoadedSkill) bool {
+		for _, s := range list {
+			if s.Name == "acp-demo" {
+				return true
+			}
+		}
+		return false
+	}
+	list, err := loadSkillsIn(tmp)
+	if err != nil {
+		t.Fatalf("loadSkillsIn: %v", err)
+	}
+	if !hasDemo(list) {
+		t.Fatalf("acp-demo missing from %v", list)
+	}
+	// The process cwd (the package dir) holds no such project skill.
+	list, err = loadSkillsFromEnv()
+	if err != nil {
+		t.Fatalf("loadSkillsFromEnv: %v", err)
+	}
+	if hasDemo(list) {
+		t.Fatal("acp-demo loaded from process cwd")
+	}
+}

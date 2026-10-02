@@ -10,6 +10,7 @@ import (
 	"iter"
 	"net/http"
 	"strings"
+	"time"
 
 	"yoli/internal/ai"
 )
@@ -40,7 +41,18 @@ type OpenAICompatProvider struct {
 	referer          string
 	title            string
 	includeReasoning bool
+	// retryDelays are the waits before each retry of a rate-limited
+	// Chat; its length is the retry count.
+	retryDelays []time.Duration
 }
+
+// defaultRetryDelays back off for 30s in all before giving up.
+var defaultRetryDelays = []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second}
+
+// rateLimitError marks a rate-limited request so Chat can retry it.
+type rateLimitError struct{ msg string }
+
+func (e *rateLimitError) Error() string { return e.msg }
 
 // NewOpenAICompatProvider validates options and returns a ready provider.
 // Returns an error if no API key is supplied in opts.
@@ -69,11 +81,34 @@ func NewOpenAICompatProvider(opts OpenAICompatOptions) (*OpenAICompatProvider, e
 		referer:          opts.Referer,
 		title:            opts.Title,
 		includeReasoning: opts.IncludeReasoning,
+		retryDelays:      defaultRetryDelays,
 	}, nil
 }
 
-// Chat performs a non-streaming completion.
+// Chat performs a non-streaming completion. A rate-limited request is
+// retried after each of retryDelays; a cancelled ctx stops the wait.
 func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
+	for i := 0; ; i++ {
+		resp, err := p.chat(ctx, req)
+		var rl *rateLimitError
+		if !errors.As(err, &rl) {
+			return resp, err
+		}
+		if i == len(p.retryDelays) {
+			if i > 0 {
+				err = fmt.Errorf("%w (gave up after %d retries)", err, i)
+			}
+			return resp, err
+		}
+		select {
+		case <-ctx.Done():
+			return ai.ChatResponse{}, ctx.Err()
+		case <-time.After(p.retryDelays[i]):
+		}
+	}
+}
+
+func (p *OpenAICompatProvider) chat(ctx context.Context, req ai.ChatRequest) (ai.ChatResponse, error) {
 	resp, err := p.send(ctx, req, false)
 	if err != nil {
 		return ai.ChatResponse{}, err
@@ -83,6 +118,16 @@ func (p *OpenAICompatProvider) Chat(ctx context.Context, req ai.ChatRequest) (ai
 	var wire wireResponse
 	if err := json.NewDecoder(resp.Body).Decode(&wire); err != nil {
 		return ai.ChatResponse{}, fmt.Errorf("provider: decode response: %w", err)
+	}
+	// OpenRouter reports some upstream failures (e.g. a rate-limited
+	// model) as HTTP 200 with an error body and no choices. Without this
+	// check the loop would read it as an empty final answer.
+	if wire.Error != nil {
+		msg := fmt.Sprintf("provider: request failed: %v — %s", wire.Error.Code, wire.Error.Message)
+		if fmt.Sprint(wire.Error.Code) == "429" {
+			return ai.ChatResponse{}, &rateLimitError{msg: msg}
+		}
+		return ai.ChatResponse{}, errors.New(msg)
 	}
 
 	var content *string
@@ -261,6 +306,9 @@ func (p *OpenAICompatProvider) send(
 			msg += " (hint: set \"context_window\" in the provider profile to your server's context limit)"
 			return nil, &ai.ContextOverflowError{StatusCode: resp.StatusCode, Message: msg}
 		}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, &rateLimitError{msg: msg}
+		}
 		return nil, errors.New(msg)
 	}
 	return resp, nil
@@ -311,6 +359,15 @@ type wireResponse struct {
 		FinishReason string               `json:"finish_reason"`
 	} `json:"choices"`
 	Usage *wireResponseUsage `json:"usage,omitempty"`
+	Error *wireResponseError `json:"error,omitempty"`
+}
+
+// wireResponseError is the error object an OpenAI-compatible backend
+// may return in place of choices. Code is a number on OpenRouter and a
+// string on some other servers.
+type wireResponseError struct {
+	Code    any    `json:"code"`
+	Message string `json:"message"`
 }
 
 type wireStreamDelta struct {

@@ -78,6 +78,12 @@ func loadSkillsFromEnv() ([]skills.LoadedSkill, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadSkillsIn(cwd)
+}
+
+// loadSkillsIn loads skills with project skills resolved from cwd rather
+// than the process working directory (an ACP session has its own cwd).
+func loadSkillsIn(cwd string) ([]skills.LoadedSkill, error) {
 	dirs := ResolveSkillDirs(cwd, os.Getenv("HOME"))
 	return skills.Load(skills.LoadOptions{
 		ProjectDir: dirs.ProjectDir,
@@ -90,7 +96,17 @@ func loadSkillsFromEnv() ([]skills.LoadedSkill, error) {
 // failures degrade to an empty list with a stderr warning — a broken
 // skills directory must never break the agent.
 func loadSkillsForPrompt(warn io.Writer) []skills.LoadedSkill {
-	list, err := loadSkillsFromEnv()
+	cwd, err := os.Getwd()
+	if err != nil {
+		fmt.Fprintf(warn, "yoli: skills: %v (continuing without skills)\n", err)
+		return nil
+	}
+	return loadSkillsForPromptIn(cwd, warn)
+}
+
+// loadSkillsForPromptIn is loadSkillsForPrompt for an explicit cwd.
+func loadSkillsForPromptIn(cwd string, warn io.Writer) []skills.LoadedSkill {
+	list, err := loadSkillsIn(cwd)
 	if err != nil {
 		fmt.Fprintf(warn, "yoli: skills: %v (continuing without skills)\n", err)
 		return nil

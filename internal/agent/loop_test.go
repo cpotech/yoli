@@ -849,6 +849,34 @@ func TestRun_StopsAtMaxIterations(t *testing.T) {
 	}
 }
 
+func TestRun_MaxIterationsReturnsTypedError(t *testing.T) {
+	prov := &scriptedProvider{responses: []ai.ChatResponse{
+		{ToolCalls: []ai.ToolCall{{ID: "a", Name: "noop", Arguments: "{}"}}},
+		{ToolCalls: []ai.ToolCall{{ID: "b", Name: "noop", Arguments: "{}"}}},
+	}}
+	noop := &fnTool{
+		def: ai.ToolDefinition{Name: "noop", Parameters: map[string]any{"type": "object"}},
+		run: func(_ context.Context, _ json.RawMessage) (string, error) { return "ok", nil },
+	}
+	_, err := Run(context.Background(), RunOptions{
+		Provider:      prov,
+		Model:         "m",
+		Tools:         []tools.Tool{noop},
+		Messages:      []ai.Message{userMsg("go")},
+		MaxIterations: 2,
+	})
+	var mi *MaxIterationsError
+	if !errors.As(err, &mi) {
+		t.Fatalf("err = %v (%T), want *MaxIterationsError", err, err)
+	}
+	if mi.Max != 2 {
+		t.Fatalf("Max = %d, want 2", mi.Max)
+	}
+	if want := "Agent stopped after reaching maxIterations=2 without a final response"; err.Error() != want {
+		t.Fatalf("err = %q, want %q", err.Error(), want)
+	}
+}
+
 func TestRun_RepeatedIdenticalToolCallsAreAllowedUntilMaxIterations(t *testing.T) {
 	// Yoli follows the PI / OpenCode design: there is no stall
 	// detection. A weak model that re-issues the same tool call every

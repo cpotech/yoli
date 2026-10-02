@@ -117,7 +117,7 @@ func TestCLI_NoArgsPrintsUsageToStderr(t *testing.T) {
 
 func TestCLI_NoArgsUsageListsAllSubcommands(t *testing.T) {
 	r := runCli(t, nil, runOpts{})
-	for _, want := range []string{"version", "chat", "tui", "run", "agent", "session", "skills", "config"} {
+	for _, want := range []string{"version", "chat", "tui", "run", "agent", "acp", "session", "skills", "config"} {
 		if !strings.Contains(r.stderr, want) {
 			t.Fatalf("stderr missing %q: %q", want, r.stderr)
 		}
@@ -163,6 +163,34 @@ func TestTUI_PositionalArgsPrintUsage(t *testing.T) {
 	if !strings.Contains(strings.ToLower(r.stderr), "usage") ||
 		!strings.Contains(r.stderr, "tui") {
 		t.Fatalf("stderr = %q", r.stderr)
+	}
+}
+
+// ---- acp ----
+
+func TestACP_MissingProviderErrors(t *testing.T) {
+	r := runCli(t, []string{"acp"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("exit = 0")
+	}
+	if !strings.Contains(r.stderr, "no provider profiles defined") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+	if r.stdout != "" {
+		t.Fatalf("stdout must carry only ACP frames, got %q", r.stdout)
+	}
+}
+
+func TestACP_UnknownFlagPrintsUsage(t *testing.T) {
+	r := runCli(t, []string{"acp", "--bogus"}, runOpts{})
+	if r.exitCode == 0 {
+		t.Fatalf("exit = 0")
+	}
+	if !strings.Contains(r.stderr, "Usage: yoli acp") {
+		t.Fatalf("stderr = %q", r.stderr)
+	}
+	if r.stdout != "" {
+		t.Fatalf("stdout = %q", r.stdout)
 	}
 }
 

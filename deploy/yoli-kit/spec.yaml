@@ -28,6 +28,11 @@ network:
   # the Brave search host is not, so allow it here.
   allowedDomains:
     - "api.search.brave.com:443"
+  # `next dev` serves on 3000; `sbx ports <sandbox>` shows the host side.
+  publishedPorts:
+    - container: 3000
+      protocol: tcp
+      name: next
 
 # Credential injection is handled by proxy custom-secrets registered by
 # scripts/sbx.sh (`sbx secret set-custom` keyed by provider host, with a unique

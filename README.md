@@ -52,6 +52,7 @@ the current repository. `scripts/sbx.sh` is the one-command entry point:
 
 ```bash
 scripts/sbx.sh              # yoli TUI in a sandbox on the current directory
+scripts/sbx.sh acp          # yoli acp in that sandbox, for your editor
 ```
 
 Your **API keys never enter the sandbox**: yoli gets a placeholder config and the
@@ -71,7 +72,7 @@ internal/
     skills/               # loader, injector, expander
     tools/                # Read, Write, LS, Bash, Edit, Glob, Grep, WebSearch, Agent, Skill
     yolium/               # NDJSON protocol + bridge tools
-  cli/                    # command surface (chat, tui, run, agent, session, skills, provider, config)
+  cli/                    # command surface (chat, tui, run, agent, acp, session, skills, provider, config)
 skills/                   # built-in skills (plan, …), embedded into the binary via go:embed
 ```
 
@@ -93,6 +94,7 @@ A global `--loglevel debug|info|error|none` flag may precede any command.
 | `yoli tui` | Run an interactive line-based REPL (see [docs/yoli-tui.md](docs/yoli-tui.md)). |
 | `yoli run --role <role>` | Run the stdio agent with the given role (`coder`, `planner`, `reviewer`). |
 | `yoli agent [flags]` | Run the headless agent loop and emit Yolium NDJSON progress/complete events on stdout. |
+| `yoli acp [--provider <name>]` | Serve the Agent Client Protocol over stdio so editors (Zed, CodeCompanion.nvim, avante.nvim) can run yoli as an agent (see [docs/acp.md](docs/acp.md)). |
 | `yoli session list \| current \| tree \| branch` | Inspect and operate on session files. |
 | `yoli skills list` / `show <name>` | Inspect skills available to the agent (see [Skills](#skills)). |
 | `yoli provider list` | List the provider profiles you have configured (see [Providers](#providers)). |
@@ -167,8 +169,8 @@ variables are not read. See
 [docs/configuration.md](docs/configuration.md).
 
 Endpoints are named profiles under the `providers` key of the config
-file, selected with `--provider <name>` (on `chat`, `tui`, `run`, and
-`agent`), the `default_provider` config key, or the `/provider` command
+file, selected with `--provider <name>` (on `chat`, `tui`, `run`, `agent`,
+and `acp`), the `default_provider` config key, or the `/provider` command
 inside the TUI (use `/providers` to just list them). `yoli provider list`
 (or `yoli config providers`) lists the defined profiles.
 
@@ -202,6 +204,7 @@ The version is applied consistently across build paths:
 - [Providers](docs/providers.md)
 - [Configuration](docs/configuration.md)
 - [Skills](docs/skills.md)
+- [ACP server](docs/acp.md) — run yoli inside editors
 - [Feature plans](docs/features/README.md) — planned work, not yet implemented
 
 ## License
