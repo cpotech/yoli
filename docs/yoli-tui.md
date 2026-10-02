@@ -21,7 +21,8 @@ Run `yoli tui` to start an interactive REPL session with the following features:
 
 - **Line Editing**:
   - **Backspace**: Delete character before cursor
-  - **Ctrl-C**: Clear the current input line (without quitting)
+  - **Ctrl-C**: Clear the current input line (without quitting); while the
+    agent is working, cancel the running turn
   - **Ctrl-D**: Exit the REPL when line is empty (or Ctrl-D at EOF)
   - **Enter**: Submit the prompt
 
@@ -36,6 +37,8 @@ Run `yoli tui` to start an interactive REPL session with the following features:
 Available commands in TUI mode:
 - `/help` - Show available commands
 - `/model [slug]` - Show or switch the AI model
+- `/provider [name]` - Show or switch the provider profile (endpoint, model and context limits)
+- `/providers` - List provider profiles without switching
 - `/skill [name|off]` - Show, set, or clear the active skill (Shift-Tab cycles)
 - `/context` - Show estimated context size (includes the active skill body)
 - `/clear` (alias `/new`) - Start a new session
@@ -81,6 +84,12 @@ The editor reads these sequences byte-by-byte after detecting the initial `ESC` 
 ```bash
 # Start TUI mode
 yoli tui
+
+# With a specific provider profile
+yoli tui --provider openrouter
+
+# In a Docker sandbox (see sandbox.md)
+yoli-sbx
 
 # With session options
 yoli tui --no-session

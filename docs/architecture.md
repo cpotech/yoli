@@ -10,7 +10,8 @@ the built-in skill bundle (`skills/*/SKILL.md`) into the binary via
 
 Provider-agnostic AI abstractions. Defines the `Provider` and `Tool`
 interfaces that the rest of the system targets, plus the built-in providers
-under `internal/ai/providers`: `FauxProvider` and `OpenRouterProvider`.
+under `internal/ai/providers`: `OpenAICompatProvider` (any OpenAI-compatible
+endpoint) and `FauxProvider` (a test stub).
 
 Providers are pure: they receive credentials explicitly through their
 options structs and expose a uniform streaming interface. They have no
@@ -52,10 +53,10 @@ The agent loop and its tools. Contains:
 The `yoli` command-line entry point. Owns:
 
 - Argument parsing for the `version`, `config`, `chat`, `tui`, `run`,
-  `agent`, `acp`, `session`, and `skills` subcommands. Dispatch is a plain
+  `agent`, `acp`, `session`, `skills`, and `provider` subcommands. Dispatch is a plain
   `switch` in `cli.Run` — no third-party argument parser.
-- Session resolution for `chat` and `agent`: parsing `--no-session`,
-  `-c`, `--session`, and `--fork`, then handing a `*session.Session` to
+- Session resolution for `chat`, `tui`, and `agent`: parsing `--no-session`,
+  `-c` (`--continue` for `agent`), `--session`, and `--fork`, then handing a `*session.Session` to
   the loop so seed messages, the user prompt, and every assistant/tool
   reply land on disk in one place.
 - The user/project config layer (see [configuration.md](configuration.md)).
@@ -63,6 +64,12 @@ The `yoli` command-line entry point. Owns:
   provider profile into the loaded config and passes the resulting values
   explicitly to providers and tools before delegating to the agent. The
   process environment never carries settings.
+
+## Sandbox launcher
+
+`yoli-sbx` (`scripts/sbx.sh`, the `deploy/yoli-kit` Docker Sandboxes kit and
+`Dockerfile.sbx`) sits outside the Go module: it packages the same binary into
+a microVM image and needs no code changes in yoli. See [sandbox.md](sandbox.md).
 
 ## Dependency direction
 
@@ -78,9 +85,7 @@ consumer of `internal/agent`.
 
 Each package owns its tests next to its sources (`*_test.go`). CLI tests
 re-exec the test binary with `YOLI_CLI_TEST_HELPER=1` so they exercise the
-real argv → exit-code surface in an isolated subprocess. `internal/docs`
-is a test-only doc guard: it pins `README.md` to the current code so dead
-relative links and stale tool names fail the build.
+real argv → exit-code surface in an isolated subprocess.
 
 Run everything with:
 

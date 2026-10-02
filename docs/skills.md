@@ -26,6 +26,15 @@ alongside the executable.
 - **plan** (`skills/plan/SKILL.md`) — analyze the codebase and produce a
   structured implementation plan (ordered steps, files to modify,
   acceptance criteria, test specifications) without writing code.
+- **code** (`skills/code/SKILL.md`) — implement an approved plan with
+  tests, run the project checks, and leave the changes uncommitted for
+  you to review.
+- **verify** (`skills/verify/SKILL.md`) — read-only review of the changes
+  for correctness, over-engineering, and project guideline compliance.
+
+For coding requests, the `chat`, `tui` and `agent` system prompts tell the
+model to run these in order — plan → code → verify — without skipping
+verification, and to leave committing to you.
 
 To add a new built-in, create `skills/<name>/SKILL.md` in the repo and
 rebuild; the embed pattern picks up every `*/SKILL.md` automatically.
