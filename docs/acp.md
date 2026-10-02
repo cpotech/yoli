@@ -76,6 +76,10 @@ after a turn; for plain Neovim buffers, set `autoread` and run
 
 ## Editor setup
 
+To keep the editor on the host but run the agent in a Docker sandbox, use
+`yoli-sbx acp` (`scripts/sbx.sh acp`) wherever the setups below say
+`yoli acp` — see [sandbox.md](sandbox.md#from-your-editor).
+
 ### CodeCompanion.nvim
 
 ```lua

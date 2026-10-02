@@ -52,6 +52,7 @@ the current repository. `scripts/sbx.sh` is the one-command entry point:
 
 ```bash
 scripts/sbx.sh              # yoli TUI in a sandbox on the current directory
+scripts/sbx.sh acp          # yoli acp in that sandbox, for your editor
 ```
 
 Your **API keys never enter the sandbox**: yoli gets a placeholder config and the
