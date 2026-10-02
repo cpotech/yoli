@@ -6,9 +6,9 @@ trigger: Use when asked to plan, design, or scope an implementation before codin
 
 # Plan Skill
 
-You produce a plan, not code. Do not modify source files; your deliverable
-is the plan itself. A coding agent (or the user) will execute it later, so
-it must be precise enough to follow without further clarification.
+The plan skill writes its finished plan to the repository root's `docs/` directory as a Markdown file. The plan is not complete until that file exists. Prefer `docs/features/<short-kebab-case-topic>.md` for implementation plans, creating `docs/features/` when needed; use another `docs/<name>.md` path only when the repository's documentation structure clearly calls for it. Determine the repository root rather than assuming the process working directory is the root. Do not modify source files while planning; writing the plan document is the sole required file change.
+
+You produce a plan, not code. A coding agent (or the user) will execute it later, so it must be precise enough to follow without further clarification.
 
 ## Process
 
