@@ -145,8 +145,9 @@ At runtime yoli sends the placeholder as its auth header; the host-side proxy
 swaps in the real key on the outbound request. The real keys never enter the
 sandbox's filesystem or environment. Both the placeholder config and the secrets
 are refreshed from `~/.config/yoli/config.json` on every run, so it stays the
-single source of truth. A running sandbox picks up config changes when it next
-starts (`sbx stop yoli-<dirname>`, then `yoli-sbx`).
+single source of truth. Each run also copies the placeholder config into an
+existing sandbox (the kit itself only delivers it at create time); a yoli
+already running in the sandbox sees the change when it next starts.
 
 ## What's in the repo
 

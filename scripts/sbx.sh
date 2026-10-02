@@ -144,6 +144,11 @@ if [[ -z "$mounted" ]]; then
 elif [[ ! "$mounted" -ef "$workspace" ]]; then
   echo "sbx: sandbox $name already mounts $mounted; set NAME= to use another name" >&2
   exit 2
+else
+  # Kit files are copied only at create time, so push the freshly rendered
+  # config into the existing sandbox (sbx exec starts it if stopped).
+  "$sbx" exec -i "$name" sh -c 'mkdir -p ~/.config/yoli && cat > ~/.config/yoli/config.json' \
+    < "$kit_dir/files/home/.config/yoli/config.json"
 fi
 if [[ $# -gt 0 ]]; then
   tty=()
