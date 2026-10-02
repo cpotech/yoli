@@ -15,25 +15,34 @@ func TestGetRolePrompt_CoderMentionsCode(t *testing.T) {
 	if len(p) == 0 || !strings.Contains(strings.ToLower(p), "code") {
 		t.Fatalf("prompt = %q", p)
 	}
+	for _, want := range []string{"plan", "verify", "must not run git commit", "user owns the final commit"} {
+		if !strings.Contains(strings.ToLower(p), want) {
+			t.Fatalf("coder prompt missing %q: %q", want, p)
+		}
+	}
 }
 
-func TestGetRolePrompt_PlannerMentionsPlan(t *testing.T) {
+func TestGetRolePrompt_PlannerMentionsPlanAndNoMutation(t *testing.T) {
 	p, err := GetRolePrompt("planner")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(p) == 0 || !strings.Contains(strings.ToLower(p), "plan") {
-		t.Fatalf("prompt = %q", p)
+	for _, want := range []string{"plan", "do not modify files", "do not commit"} {
+		if !strings.Contains(strings.ToLower(p), want) {
+			t.Fatalf("planner prompt missing %q: %q", want, p)
+		}
 	}
 }
 
-func TestGetRolePrompt_ReviewerMentionsReview(t *testing.T) {
+func TestGetRolePrompt_ReviewerIsReadOnly(t *testing.T) {
 	p, err := GetRolePrompt("reviewer")
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if len(p) == 0 || !strings.Contains(strings.ToLower(p), "review") {
-		t.Fatalf("prompt = %q", p)
+	for _, want := range []string{"review", "read-only", "worktree diff", "do not modify files"} {
+		if !strings.Contains(strings.ToLower(p), want) {
+			t.Fatalf("reviewer prompt missing %q: %q", want, p)
+		}
 	}
 }
 

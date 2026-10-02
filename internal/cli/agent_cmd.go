@@ -435,6 +435,27 @@ func runAgent(args []string, stdout, stderr io.Writer) int {
 	}, stdout, stderr)
 }
 
+func headlessSystemPrompt(yoliumMode bool) string {
+	workflow := "For coding requests, automatically follow the plan → code → verify workflow in that order: produce or load a plan, implement it, then perform read-only verification. Do not skip verification. The coder must not run git " + "commit, git " + "push, reset, rebase, or destructive cleanup. Leave changes uncommitted; the user owns the final commit. "
+	if yoliumMode {
+		return "You are Yoli, a headless coding agent integrated with Yolium. " + workflow +
+			"Use the provided tools to inspect and modify the working directory. " +
+			"Communicate progress and final results by calling the `yolium_*` protocol tools: " +
+			"yolium_progress, yolium_add_comment, yolium_update_description, yolium_set_test_specs, " +
+			"yolium_create_item, yolium_action, yolium_start_agent for non-terminating events; " +
+			"and exactly one of yolium_complete, yolium_error, or yolium_ask_question to end the run. " +
+			"DO NOT emit `@@YOLIUM:{...}` lines as plain text — under --yolium-mode those are ignored. " +
+			"The terminator tools are the ONLY way to end the loop; a turn with no tool calls is treated as 'keep going'. " +
+			"yolium_complete reports the reviewed result; it does not authorize a commit. " +
+			"If you cannot finish the task, call yolium_error with a one-sentence reason."
+	}
+	return "You are Yoli, a headless coding agent. " + workflow +
+		"Use the provided tools to inspect and modify the working directory. " +
+		"Communicate progress and final results by writing protocol lines DIRECTLY in your assistant text — one line per message, in the form `@@YOLIUM:<json>`. " +
+		"Every run MUST end with exactly one of `complete`, `error`, or `ask_question`. Do not use Bash to echo protocol lines. " +
+		"If you cannot finish the task, emit `error` with a one-sentence reason."
+}
+
 func firstNonEmpty(a, b string) string {
 	if a != "" {
 		return a
@@ -509,45 +530,7 @@ func runAgentLoop(c agentLoopConfig, stdout, stderr io.Writer) int {
 		})
 	}
 
-	var system string
-	if c.yoliumMode {
-		system = "You are Yoli, a headless coding agent integrated with Yolium. " +
-			"Use the provided tools to inspect and modify the working directory. " +
-			"Communicate progress and final results by calling the `yolium_*` " +
-			"protocol tools: yolium_progress, yolium_add_comment, " +
-			"yolium_update_description, yolium_set_test_specs, " +
-			"yolium_create_item, yolium_action, yolium_start_agent for " +
-			"non-terminating events; and exactly one of yolium_complete, " +
-			"yolium_error, or yolium_ask_question to end the run. " +
-			"DO NOT emit `@@YOLIUM:{...}` lines as plain text — under " +
-			"--yolium-mode those are ignored. The terminator tools " +
-			"are the ONLY way to end the loop; a turn with no tool calls " +
-			"is treated as 'keep going'. yolium_complete is rejected while " +
-			"uncommitted git changes exist — commit your work (git add + " +
-			"git commit via Bash) before calling it. If you cannot finish " +
-			"the task, call yolium_error with a one-sentence reason."
-	} else {
-		system = "You are Yoli, a headless coding agent. " +
-			"Use the provided tools to inspect and modify the working directory. " +
-			"Communicate progress and final results by writing protocol lines " +
-			"DIRECTLY in your assistant text — one line per message, in the form " +
-			"`@@YOLIUM:<json>`. " +
-			"Examples (paste these as your own message text, not as tool arguments): " +
-			`@@YOLIUM:{"type":"progress","step":"plan","detail":"reading src/"} ` +
-			`@@YOLIUM:{"type":"comment","text":"found 3 candidates"} ` +
-			`@@YOLIUM:{"type":"ask_question","text":"which library?","options":["a","b"]} ` +
-			`@@YOLIUM:{"type":"complete","summary":"all tests pass"} ` +
-			`@@YOLIUM:{"type":"error","message":"could not build"}. ` +
-			"NEVER use the Bash tool with `echo '@@YOLIUM:...'` to emit protocol " +
-			"lines — type them straight into your text response. Bash echoes waste " +
-			"a tool call and force a follow-up turn. " +
-			"Every run MUST end with exactly one of `complete`, `error`, or " +
-			"`ask_question`. Emitting any of those three ends the run immediately " +
-			"— do not call tools or write more text after the terminating line. " +
-			"There is no `complete` tool; the line itself is the signal. If you " +
-			"cannot finish the task, emit `error` with a one-sentence reason " +
-			"rather than going silent."
-	}
+	system := headlessSystemPrompt(c.yoliumMode)
 
 	if sec := skills.InjectSection(c.skillList); sec != "" {
 		system += "\n\n" + sec
